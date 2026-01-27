@@ -715,7 +715,7 @@ Funciones para buscar y traer datos de usuarios desde AD.
 Retornan diccionarios con atributos o {"error": msg} en caso de fallo.
 """
 
-def get_user_data(identifier: str):
+def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
     """
     Busca un usuario por identifier y retorna sus atributos principales.
     
@@ -823,7 +823,7 @@ def get_user_data(identifier: str):
 Funciones para traer grupos de un usuario (lazy-loaded en la UI para no ralentizar).
 """
 
-def get_groups_from_dn(user_dn: str):
+def get_groups_from_dn(user_dn: str) -> List[str]:
     """
     Obtiene lista de grupos a los que pertenece un usuario.
     
@@ -883,7 +883,7 @@ def get_groups_from_dn(user_dn: str):
 Funciones para buscar y traer datos de equipos (computadoras) desde AD.
 """
 
-def get_computer_data(samname: str):
+def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
     """
     Busca un equipo por SAMAccountName y retorna sus atributos principales.
     
@@ -970,7 +970,7 @@ Genera reportes de inactividad basados en lastLogonTimestamp.
 Útiles para higiene de directorio (desactivar/eliminar objetos inactivos).
 """
 
-def fetch_inactives(kind: str, days: int):
+def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
     """
     Genera reporte de usuarios o equipos inactivos en el scope MRO.
     
@@ -1078,7 +1078,7 @@ def fetch_inactives(kind: str, days: int):
 _INTERNAL_KEYS = {"_dn", "_bloqueado_bool", "_uac", "_lockoutTime_raw", "_lockoutTime_int"}
 
 
-def build_user_export_txt(user_data: dict, groups: list[str]) -> bytes:
+def build_user_export_txt(user_data: Dict[str, Any], groups: List[str]) -> bytes:
     lines = []
     lines.append("Consulta AD - Export (usuario + grupos)")
     lines.append(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
@@ -1100,14 +1100,14 @@ def build_user_export_txt(user_data: dict, groups: list[str]) -> bytes:
     return ("\n".join(lines)).encode("utf-8")
 
 
-def build_user_export_csv(user_data: dict, groups: list[str]) -> bytes:
+def build_user_export_csv(user_data: Dict[str, Any], groups: List[str]) -> bytes:
     flat = {k: v for k, v in user_data.items() if k not in _INTERNAL_KEYS}
     flat["Grupos"] = "; ".join(groups) if groups else ""
     df = pd.DataFrame([flat])
     return df.to_csv(index=False).encode("utf-8")
 
 
-def reset_user_caches_for_dn(dn: str):
+def reset_user_caches_for_dn(dn: str) -> None:
     st.session_state["groups_dn"] = dn
     st.session_state.pop("groups_list", None)
     st.session_state.pop("groups_error", None)
@@ -1118,7 +1118,7 @@ def reset_user_caches_for_dn(dn: str):
     st.session_state.pop("export_stamp_dn", None)
 
 
-def ensure_export_ready(dn: str, user_data: dict):
+def ensure_export_ready(dn: str, user_data: Dict[str, Any]) -> None:
     if not dn:
         return
 
@@ -1175,7 +1175,7 @@ Funciones de renderizado HTML/Streamlit para mostrar datos y acciones.
 Incluye cards, botones de unlock, reset de password, y movimiento de OUs.
 """
 
-def render_card(k, v):
+def render_card(k: str, v: Any) -> None:
     """
     Renderiza una tarjeta HTML para mostrar un atributo AD.
     
@@ -1223,7 +1223,7 @@ def render_card(k, v):
     )
 
 
-def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
+def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str) -> None:
     """
     Renderiza la fila de estado "Bloqueado" con botón de desbloqueo.
     
@@ -1284,7 +1284,7 @@ def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
             st.markdown("<div style='height: 52px;'></div>", unsafe_allow_html=True)
 
 
-def render_reset_password_section(dn: str):
+def render_reset_password_section(dn: str) -> None:
     """
     Renderiza sección expandible para resetear contraseña de usuario.
     
@@ -1376,7 +1376,7 @@ def render_reset_password_section(dn: str):
                 st.error(f"No se pudo resetear: {type(e).__name__}: {e}")
 
 
-def render_move_computer_card(in_default: bool, dn: str, criterio: str):
+def render_move_computer_card(in_default: bool, dn: str, criterio: str) -> None:
     """
     Renderiza tarjeta con opción de mover equipo fuera de la OU Default.
     
@@ -1425,7 +1425,7 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str):
 Función principal que ejecuta búsqueda en AD y guarda resultados en session_state.
 """
 
-def run_search(modo: str, criterio: str):
+def run_search(modo: str, criterio: str) -> None:
     """
     Ejecuta búsqueda en AD (Usuario o Equipo).
     
