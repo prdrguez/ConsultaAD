@@ -103,10 +103,7 @@ def get_config(path: str, default: Any = None) -> Any:
 # =====================================================
 # COM context management (evita CoInitialize/CoUninitialize desparejos)
 # =====================================================
-"""
-Administración segura de contexto COM para operaciones LDAP/ADSI.
-Usa refcounting para permitir llamadas anidadas sin desininicializar prematuramente.
-"""
+
 _COM_LOCK = threading.Lock()
 _COM_DEPTH = 0
 
@@ -146,11 +143,6 @@ def com_context():
 # =====================================================
 # Configuración de dominio AD (Teva.Corp)
 # =====================================================
-"""
-Constantes que definen la estructura del dominio y OUs en Active Directory Teva.
-
-Se cargan desde config.yaml. Si no existe, usan valores por defecto.
-"""
 
 # Cargar configuración
 _config_ad = get_config("active_directory", {})
@@ -575,13 +567,8 @@ def dn_is_under_scope_ou(dn: str) -> bool:
 
 
 # =====================================================
-# Operaciones de escribtura en AD (Acciones privilegiadas)
+# Operaciones de escritura en AD (Acciones privilegiadas)
 # =====================================================
-"""
-Funciones que modifican estado en Active Directory.
-Requieren permisos de dominio y contexto COM inicializado.
-Usan patrón: intenta pyad → fallback ADSI si es necesario.
-"""
 
 def unlock_user_by_dn(user_dn: str) -> None:
     """
@@ -710,10 +697,6 @@ def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
 # =====================================================
 # Consulta de Usuarios
 # =====================================================
-"""
-Funciones para buscar y traer datos de usuarios desde AD.
-Retornan diccionarios con atributos o {"error": msg} en caso de fallo.
-"""
 
 def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
     """
@@ -819,9 +802,6 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
 # =====================================================
 # Pertenencia a Grupos (lazy-load)
 # =====================================================
-"""
-Funciones para traer grupos de un usuario (lazy-loaded en la UI para no ralentizar).
-"""
 
 def get_groups_from_dn(user_dn: str) -> List[str]:
     """
@@ -879,9 +859,6 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
 # =====================================================
 # Consulta de Equipos
 # =====================================================
-"""
-Funciones para buscar y traer datos de equipos (computadoras) desde AD.
-"""
 
 def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
     """
@@ -965,10 +942,6 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
 # =====================================================
 # Reportes (Usuarios/Equipos inactivos)
 # =====================================================
-"""
-Genera reportes de inactividad basados en lastLogonTimestamp.
-Útiles para higiene de directorio (desactivar/eliminar objetos inactivos).
-"""
 
 def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
     """
@@ -1170,10 +1143,6 @@ def looks_weak_password(pwd: str) -> bool:
 # =====================================================
 # Componentes UI (Cards y Acciones)
 # =====================================================
-"""
-Funciones de renderizado HTML/Streamlit para mostrar datos y acciones.
-Incluye cards, botones de unlock, reset de password, y movimiento de OUs.
-"""
 
 def render_card(k: str, v: Any) -> None:
     """
@@ -1421,9 +1390,6 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str) -> None:
 # =====================================================
 # Búsqueda
 # =====================================================
-"""
-Función principal que ejecuta búsqueda en AD y guarda resultados en session_state.
-"""
 
 def run_search(modo: str, criterio: str) -> None:
     """
@@ -1454,20 +1420,8 @@ def run_search(modo: str, criterio: str) -> None:
 
 
 # =====================================================
-# Streamlit UI
+# Streamlit UI - Configuración
 # =====================================================
-# =====================================================
-# Interfaz Streamlit - Configuración y Sidebar
-# =====================================================
-"""
-Aplicación web Streamlit para consultar Active Directory.
-
-Flujo:
-1. Usuario elige modo (Usuario/Equipo/Reportes) en sidebar
-2. Si Usuario/Equipo: ingresa criterio y presiona "Buscar"
-3. Si Reportes: elige tipo y días, presiona "Generar reporte"
-4. Resultados se muestran en el área principal con opciones de acción
-"""
 
 st.set_page_config(page_title="Consulta AD", page_icon="🖥️", layout="wide")
 
@@ -1507,9 +1461,6 @@ if "limpiar" in locals() and limpiar:
 # =====================================================
 # Área Principal: Usuario / Equipo (búsqueda)
 # =====================================================
-"""
-Lógica para mostrar resultados de búsqueda de usuario o equipo.
-"""
 
 if modo in ("Usuario", "Equipo"):
     if "buscar" in locals() and buscar:
@@ -1720,9 +1671,7 @@ else:
     # =====================================================
     # Área Principal: Reportes (inactividad)
     # =====================================================
-    """
-    Lógica para generar y mostrar reportes de inactividad.
-    """
+
     if "ejecutar_rep" in locals() and ejecutar_rep:
         with st.spinner("Generando reporte…"):
             rep = fetch_inactives(tipo_rep, int(dias))
