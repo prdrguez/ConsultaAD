@@ -52,6 +52,72 @@ if not logger.handlers:
 
 
 # =====================================================
+# AD Exception Handlers (Fase 4: Granular error handling)
+# =====================================================
+def handle_ad_object_not_found(identifier: str, exc: Exception) -> Dict[str, str]:
+    """
+    Maneja excepción cuando un objeto AD no es encontrado.
+    
+    Args:
+        identifier: El objeto buscado (usuario, equipo, etc.)
+        exc: La excepción original
+    
+    Returns:
+        Dict con estructura de error: {"error": mensaje_amigable}
+    """
+    msg = f"No encontrado en AD: {identifier}"
+    logger.warning(f"ADObjectNotFound: {msg}")
+    return {"error": msg}
+
+
+def handle_ad_permission_denied(action: str, exc: Exception) -> Dict[str, str]:
+    """
+    Maneja excepción de permisos insuficientes en operación AD.
+    
+    Args:
+        action: Acción que se intentó (unlock, reset password, mover)
+        exc: La excepción original
+    
+    Returns:
+        Dict con estructura de error
+    """
+    msg = f"Permisos insuficientes para: {action}. Requiere privilegios de administrador."
+    logger.error(f"✗ PermissionDenied en {action}: {exc}")
+    return {"error": msg}
+
+
+def handle_ad_connection_error(exc: Exception) -> Dict[str, str]:
+    """
+    Maneja excepción de conexión a AD.
+    
+    Args:
+        exc: La excepción original
+    
+    Returns:
+        Dict con estructura de error
+    """
+    msg = "No se pudo conectar al servidor AD. Verifica conectividad y credenciales."
+    logger.error(f"✗ ConnectionError a AD: {exc}")
+    return {"error": msg}
+
+
+def handle_ad_timeout_error(operation: str, exc: Exception) -> Dict[str, str]:
+    """
+    Maneja excepción de timeout en operación AD.
+    
+    Args:
+        operation: Operación que tardó demasiado
+        exc: La excepción original
+    
+    Returns:
+        Dict con estructura de error
+    """
+    msg = f"Timeout en operación AD ({operation}). Intenta nuevamente."
+    logger.error(f"✗ Timeout en {operation}: {exc}")
+    return {"error": msg}
+
+
+# =====================================================
 # Configuration Management
 # =====================================================
 @lru_cache(maxsize=1)
@@ -616,23 +682,36 @@ def unlock_user_by_dn(user_dn: str) -> None:
             del obj
             return
 
-        except Exception as e1:
-            logger.debug(f"pyad falló: {type(e1).__name__}: {e1}. Intentando ADSI fallback...")
-            try:
-                import win32com.client
-                logger.debug("Intento 2: Usando win32com.client ADSI")
-                adsi = win32com.client.GetObject(f"LDAP://{user_dn}")
-                adsi.Put("lockoutTime", 0)
-                adsi.SetInfo()
-                logger.info("✓ Usuario desbloqueado exitosamente (ADSI fallback)")
-                del adsi
-                return
-            except Exception as e2:
-                logger.error(f"✗ Desbloqueo fallido. pyad: {type(e1).__name__}: {e1} | ADSI: {type(e2).__name__}: {e2}", exc_info=True)
-                raise RuntimeError(
-                    f"Unlock falló. pyad: {type(e1).__name__}: {e1} | "
-                    f"ADSI: {type(e2).__name__}: {e2}"
-                )
+        except AttributeError as e:
+            logger.debug(f"pyad método no disponible: {e}. Intentando ADSI fallback...")
+        except ConnectionError as e:
+            logger.error(f"✗ Error de conexión AD: {e}", exc_info=True)
+            raise RuntimeError("No se pudo conectar al servidor AD.")
+        except PermissionError as e:
+            logger.error(f"✗ Permisos insuficientes: {e}", exc_info=True)
+            raise RuntimeError("Permisos insuficientes para desbloquear el usuario.")
+        except TimeoutError as e:
+            logger.error(f"✗ Timeout en operación: {e}", exc_info=True)
+            raise RuntimeError("Timeout al desbloquear el usuario. Intenta nuevamente.")
+        except Exception as e:
+            logger.debug(f"pyad falló ({type(e).__name__}): {e}. Intentando ADSI fallback...")
+
+        # ADSI Fallback
+        try:
+            import win32com.client
+            logger.debug("Intento 2: Usando win32com.client ADSI")
+            adsi = win32com.client.GetObject(f"LDAP://{user_dn}")
+            adsi.Put("lockoutTime", 0)
+            adsi.SetInfo()
+            logger.info("✓ Usuario desbloqueado exitosamente (ADSI fallback)")
+            del adsi
+            return
+        except PermissionError as e:
+            logger.error(f"✗ Permisos insuficientes en ADSI fallback: {e}", exc_info=True)
+            raise RuntimeError("Permisos insuficientes para desbloquear el usuario.")
+        except Exception as e2:
+            logger.error(f"✗ Desbloqueo fallido en ADSI fallback: {type(e2).__name__}: {e2}", exc_info=True)
+            raise RuntimeError(f"No se pudo desbloquear el usuario: {str(e2)}")
 
 
 def reset_password_by_dn(user_dn: str, new_password: str) -> None:
@@ -683,9 +762,22 @@ def reset_password_by_dn(user_dn: str, new_password: str) -> None:
             user.SetInfo()
             logger.info("✓ Contraseña reseteada exitosamente")
             del user
-        except Exception as e:
-            logger.error(f"✗ Reset de contraseña falló: {type(e).__name__}: {e}", exc_info=True)
+        except PermissionError as e:
+            logger.error(f"✗ Permisos insuficientes para reset de contraseña: {e}", exc_info=True)
+            raise RuntimeError("Permisos insuficientes para cambiar la contraseña.")
+        except ConnectionError as e:
+            logger.error(f"✗ Error de conexión al resetear contraseña: {e}", exc_info=True)
+            raise RuntimeError("No se pudo conectar al servidor AD.")
+        except TimeoutError as e:
+            logger.error(f"✗ Timeout al resetear contraseña: {e}", exc_info=True)
+            raise RuntimeError("Timeout al cambiar la contraseña. Intenta nuevamente.")
+        except ValueError as e:
+            # Re-raise validation errors
+            logger.error(f"✗ Validación fallida: {e}")
             raise
+        except Exception as e:
+            logger.error(f"✗ Error inesperado al resetear contraseña: {type(e).__name__}: {e}", exc_info=True)
+            raise RuntimeError(f"Error al cambiar la contraseña: {str(e)}")
 
 
 def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
@@ -728,9 +820,22 @@ def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
             
             logger.info("✓ Equipo movido exitosamente")
             del target
-        except Exception as e:
-            logger.error(f"✗ Movimiento de equipo falló: {type(e).__name__}: {e}", exc_info=True)
+        except PermissionError as e:
+            logger.error(f"✗ Permisos insuficientes para mover equipo: {e}", exc_info=True)
+            raise RuntimeError("Permisos insuficientes para mover el equipo.")
+        except ConnectionError as e:
+            logger.error(f"✗ Error de conexión al mover equipo: {e}", exc_info=True)
+            raise RuntimeError("No se pudo conectar al servidor AD.")
+        except TimeoutError as e:
+            logger.error(f"✗ Timeout al mover equipo: {e}", exc_info=True)
+            raise RuntimeError("Timeout al mover el equipo. Intenta nuevamente.")
+        except ValueError as e:
+            # Re-raise validation errors
+            logger.error(f"✗ Validación fallida: {e}")
             raise
+        except Exception as e:
+            logger.error(f"✗ Error inesperado al mover equipo: {type(e).__name__}: {e}", exc_info=True)
+            raise RuntimeError(f"Error al mover el equipo: {str(e)}")
 
 
 # =====================================================
@@ -791,14 +896,19 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
 
         logger.debug(f"Query LDAP ejecutada: {where[:60]}...")
         
-        q.execute_query(
-            attributes=[
-                "distinguishedName", "sAMAccountName", "mail", "userPrincipalName",
-                "whenCreated", "whenChanged", "lockoutTime", "description", "name",
-                "userAccountControl", "pwdLastSet", "lastLogonTimestamp"
-            ],
-            where_clause=where
-        )
+        try:
+            q.execute_query(
+                attributes=[
+                    "distinguishedName", "sAMAccountName", "mail", "userPrincipalName",
+                    "whenCreated", "whenChanged", "lockoutTime", "description", "name",
+                    "userAccountControl", "pwdLastSet", "lastLogonTimestamp"
+                ],
+                where_clause=where
+            )
+        except TimeoutError as e:
+            return handle_ad_timeout_error("get_user_data query", e)
+        except ConnectionError as e:
+            return handle_ad_connection_error(e)
 
         results = list(q.get_results())
         if not results:
@@ -842,9 +952,12 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
             "Último logon (aprox.)": filetime_to_dt_str(row.get("lastLogonTimestamp")),
         }
 
+    except ValueError as e:
+        logger.error(f"✗ Validación fallida: {e}")
+        return {"error": f"Validación fallida: {str(e)}"}
     except Exception as e:
-        logger.error(f"✗ Error buscando usuario '{identifier}': {type(e).__name__}: {e}", exc_info=True)
-        return {"error": str(e)}
+        logger.error(f"✗ Error inesperado en búsqueda de usuario '{identifier}': {type(e).__name__}: {e}", exc_info=True)
+        return {"error": f"Error inesperado: {str(e)}"}
 
 
 # =====================================================
