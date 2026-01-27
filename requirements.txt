@@ -1,3 +1,5 @@
 streamlit
 pandas
-pytest
+pytestpyad
+pywin32
+PyYAML

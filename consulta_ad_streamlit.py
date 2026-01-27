@@ -31,7 +31,73 @@ from contextlib import contextmanager
 import threading
 import secrets
 import string
+import logging
+import re
+import yaml
+from typing import Optional, Dict, List, Any
 from pyad import adobject
+from functools import lru_cache
+
+# =====================================================
+# Logging Configuration
+# =====================================================
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+# =====================================================
+# Configuration Management
+# =====================================================
+@lru_cache(maxsize=1)
+def load_config() -> Dict[str, Any]:
+    """
+    Carga y cachea la configuración desde config.yaml.
+    
+    Returns:
+        Dict con toda la configuración, o defaults si no existe
+    
+    Nota:
+        Se cachea con @lru_cache para evitar relecturas de disco
+    """
+    try:
+        with open("config.yaml", "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+            logger.info("Config cargada desde config.yaml")
+            return config or {}
+    except FileNotFoundError:
+        logger.warning("config.yaml no encontrado, usando defaults")
+        return {}
+    except Exception as e:
+        logger.error(f"Error cargando config.yaml: {e}")
+        return {}
+
+
+def get_config(path: str, default: Any = None) -> Any:
+    """
+    Obtiene valor de configuración por path (ej: "security.password_validation.min_length").
+    
+    Args:
+        path: Ruta separada por puntos (ej: "active_directory.domain_dn")
+        default: Valor por defecto si no existe la clave
+    
+    Returns:
+        Valor de configuración o default
+    """
+    config = load_config()
+    keys = path.split(".")
+    value = config
+    for key in keys:
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            return default
+    return value if value is not None else default
 
 
 # =====================================================
@@ -83,21 +149,124 @@ def com_context():
 """
 Constantes que definen la estructura del dominio y OUs en Active Directory Teva.
 
-DOMAIN_DN:              DN raíz del dominio
-DEFAULT_COMPUTERS_OU_DN: OU donde se crean computadoras por defecto
-TARGET_WKS_OU_DN:       OU objetivo para mover workstations
-SCOPE_OU_DN:            Alcance para reportes de inactividad
+Se cargan desde config.yaml. Si no existe, usan valores por defecto.
 """
 
-DOMAIN_DN = "DC=Teva,DC=Corp"
+# Cargar configuración
+_config_ad = get_config("active_directory", {})
 
-DEFAULT_COMPUTERS_OU_DN = f"OU=Default,OU=Global,{DOMAIN_DN}"
-TARGET_WKS_OU_DN = f"OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global,{DOMAIN_DN}"
-SCOPE_OU_DN = f"OU=MRO,OU=AR,OU=Clients,OU=Global,{DOMAIN_DN}"
+_domain_dn_configured = _config_ad.get("domain_dn", "DC=Teva,DC=Corp")
+_default_computers_ou = _config_ad.get("default_computers_ou", "OU=Default,OU=Global")
+_target_wks_ou = _config_ad.get("target_workstations_ou", "OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global")
+_scope_ou = _config_ad.get("scope_inactivity_ou", "OU=MRO,OU=AR,OU=Clients,OU=Global")
+
+DOMAIN_DN: str = _domain_dn_configured
+DEFAULT_COMPUTERS_OU_DN: str = f"{_default_computers_ou},{DOMAIN_DN}"
+TARGET_WKS_OU_DN: str = f"{_target_wks_ou},{DOMAIN_DN}"
+SCOPE_OU_DN: str = f"{_scope_ou},{DOMAIN_DN}"
+
+logger.info(f"AD Config: domain={DOMAIN_DN}, scope_ou={SCOPE_OU_DN}")
 
 
 # =====================================================
 # Funciones auxiliares (parsing y formateo)
+# =====================================================
+# Validadores
+# =====================================================
+
+def validate_dn(dn: str, require_scope: bool = False) -> bool:
+    """
+    Valida que un DN sea válido y opcionalmente que esté en el scope permitido.
+    
+    Args:
+        dn: Distinguished Name a validar
+        require_scope: Si True, requiere que esté bajo SCOPE_OU_DN
+    
+    Returns:
+        True si es válido, False en caso contrario
+    """
+    if not dn or not isinstance(dn, str):
+        return False
+    
+    dn_clean = dn.strip()
+    
+    # Validar estructura básica
+    if not dn_clean.startswith("CN=") and not dn_clean.startswith("OU="):
+        return False
+    
+    if "," not in dn_clean:
+        return False
+    
+    # Validar scope si es requerido
+    if require_scope:
+        allow_unsafe = not get_config("security.validation.require_dn_in_scope", True)
+        if not allow_unsafe:
+            scope = get_config("security.validation.scope_ou_for_operations", "OU=MRO")
+            full_scope = f"{scope},{DOMAIN_DN}"
+            if not dn_clean.lower().endswith("," + full_scope.lower()):
+                logger.warning(f"DN {dn} está fuera del scope permitido")
+                return False
+    
+    return True
+
+
+def validate_search_criteria(criteria: str) -> tuple[bool, str]:
+    """
+    Valida criterios de búsqueda (usuario, mail, nombre de equipo).
+    
+    Args:
+        criteria: Valor de búsqueda
+    
+    Returns:
+        Tupla (es_válido, mensaje_error) donde mensaje_error es string vacío si válido
+    """
+    if not criteria or not isinstance(criteria, str):
+        return False, "Criterio no puede estar vacío"
+    
+    cleaned = criteria.strip()
+    max_len = get_config("security.validation.max_search_criteria_length", 100)
+    
+    if len(cleaned) > max_len:
+        return False, f"Criterio demasiado largo (máximo {max_len} caracteres)"
+    
+    if len(cleaned) < 2:
+        return False, "Criterio debe tener al menos 2 caracteres"
+    
+    return True, ""
+
+
+def validate_password(pwd: str) -> tuple[bool, str]:
+    """
+    Valida la fortaleza de una contraseña.
+    
+    Args:
+        pwd: Contraseña a validar
+    
+    Returns:
+        Tupla (es_válida, mensaje_error)
+    """
+    min_len = get_config("security.password_validation.min_length", 10)
+    min_cats = get_config("security.password_validation.min_categories", 3)
+    
+    if not pwd:
+        return False, "Contraseña no puede estar vacía"
+    
+    if len(pwd) < min_len:
+        return False, f"Mínimo {min_len} caracteres requeridos"
+    
+    categories = 0
+    categories += 1 if any(c.islower() for c in pwd) else 0
+    categories += 1 if any(c.isupper() for c in pwd) else 0
+    categories += 1 if any(c.isdigit() for c in pwd) else 0
+    categories += 1 if any(not c.isalnum() for c in pwd) else 0
+    
+    if categories < min_cats:
+        return False, f"Mínimo {min_cats} categorías requeridas (mayúscula, minúscula, número, símbolo)"
+    
+    return True, ""
+
+
+# Funciones auxiliares
 # =====================================================
 
 def safe_where_value(val: str) -> str:

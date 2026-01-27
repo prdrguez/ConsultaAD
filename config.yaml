@@ -1,0 +1,128 @@
+# Consulta AD - Configuración
+# Este archivo centraliza todas las constantes y settings configurables
+
+# ============================================================
+# ACTIVE DIRECTORY - Dominio y OUs
+# ============================================================
+active_directory:
+  domain: "Teva.Corp"
+  domain_dn: "DC=Teva,DC=Corp"
+  
+  # OU donde se crean nuevas computadoras por defecto
+  default_computers_ou: "OU=Default,OU=Global"
+  
+  # OU destino para mover workstations
+  target_workstations_ou: "OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global"
+  
+  # Scope para reportes de inactividad
+  scope_inactivity_ou: "OU=MRO,OU=AR,OU=Clients,OU=Global"
+
+# ============================================================
+# SEGURIDAD Y VALIDACIÓN
+# ============================================================
+security:
+  # Requiere SSL/TLS para operaciones de password reset
+  require_ssl_for_password_reset: true
+  
+  # Contraseña temporal se genera con estos parámetros
+  temp_password:
+    length: 14
+    min_categories: 4  # mayúscula, minúscula, número, símbolo
+    allowed_symbols: "!@#$%*_-+=?"
+  
+  # Validación de contraseña del usuario
+  password_validation:
+    min_length: 10
+    min_categories: 3  # al menos 3 de 4 categorías
+    
+  # Validación de entrada
+  validation:
+    max_search_criteria_length: 100
+    allowed_dn_chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789=,-_"
+    # DN debe pertenecer a este scope para operaciones peligrosas
+    require_dn_in_scope: true
+    scope_ou_for_operations: "OU=MRO,OU=AR,OU=Clients,OU=Global"
+
+# ============================================================
+# REPORTES
+# ============================================================
+reports:
+  # Opciones predefinidas de días de inactividad
+  inactivity_presets:
+    - 30
+    - 60
+    - 90
+    - 120
+    - 180
+    - 365
+  
+  # Días predeterminados seleccionados en UI
+  default_inactivity_days: 90
+
+# ============================================================
+# CACHE Y PERFORMANCE
+# ============================================================
+cache:
+  # Time-to-live en minutos para datos cacheados
+  user_data_ttl_minutes: 10
+  computer_data_ttl_minutes: 10
+  groups_ttl_minutes: 5
+  
+  # Limpiar cache automáticamente
+  auto_clear_on_new_search: true
+
+# ============================================================
+# LOGGING
+# ============================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Archivos de log
+  file:
+    enabled: false
+    path: "logs/consulta_ad.log"
+    max_size_mb: 10
+    backup_count: 3
+  
+  # Qué operaciones registrar
+  log_queries: true
+  log_writes: true
+  log_errors: true
+  log_performance: true  # tiempo de queries
+  
+  # Sensibilidad - NO loguear datos sensibles
+  sanitize_passwords: true
+  sanitize_emails: false
+
+# ============================================================
+# UI/UX
+# ============================================================
+ui:
+  page_title: "Consulta AD"
+  page_icon: "🖥️"
+  layout: "wide"
+  
+  # Mostrar spinners durante operaciones largas
+  show_spinners: true
+  spinner_message: "Procesando..."
+  
+  # Timing
+  spinner_timeout_seconds: 30
+  
+  # Debug mode
+  allow_debug_mode: true
+
+# ============================================================
+# TIMEOUTS Y LIMITS
+# ============================================================
+timeouts:
+  ad_query_timeout_seconds: 30
+  password_reset_timeout_seconds: 15
+  move_computer_timeout_seconds: 10
+  groups_fetch_timeout_seconds: 20
+
+limits:
+  max_search_results: 100
+  max_inactivity_report_rows: 10000
+  max_groups_per_user: 500
