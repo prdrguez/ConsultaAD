@@ -6,6 +6,35 @@ import pandas as pd
 import hashlib
 from datetime import datetime, timezone, timedelta
 from pyad import adobject
+from contextlib import contextmanager
+import threading
+
+
+# =====================================================
+# COM context (evita CoInitialize/CoUninitialize desparejos)
+# =====================================================
+_COM_LOCK = threading.Lock()
+_COM_DEPTH = 0
+
+
+@contextmanager
+def com_context():
+    global _COM_DEPTH
+    with _COM_LOCK:
+        if _COM_DEPTH == 0:
+            pythoncom.CoInitialize()
+        _COM_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _COM_LOCK:
+            _COM_DEPTH -= 1
+            if _COM_DEPTH <= 0:
+                _COM_DEPTH = 0
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
 
 # =====================================================
@@ -13,18 +42,13 @@ from pyad import adobject
 # =====================================================
 DOMAIN_DN = "DC=Teva,DC=Corp"
 
-# Donde caen por defecto los equipos (según tu entorno)
 DEFAULT_COMPUTERS_OU_DN = f"OU=Default,OU=Global,{DOMAIN_DN}"
-
-# OU objetivo para WKS
 TARGET_WKS_OU_DN = f"OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global,{DOMAIN_DN}"
-
-# OU "scope" para REPORTES (solo dentro de MRO)
 SCOPE_OU_DN = f"OU=MRO,OU=AR,OU=Clients,OU=Global,{DOMAIN_DN}"
 
 
 # =====================================================
-# Helpers / conversiones seguras
+# Helpers
 # =====================================================
 def safe_where_value(val: str) -> str:
     if val is None:
@@ -41,19 +65,12 @@ def format_dt(dt_obj) -> str:
 
 
 def stable_key(prefix: str, seed: str) -> str:
-    """
-    Evita keys con DN (comas, espacios, etc.) que a veces generan conflictos o duplicados.
-    """
     seed = seed or ""
     h = hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
     return f"{prefix}_{h}"
 
 
 def ad_largeint_to_int(val) -> int:
-    """
-    Convierte valores AD tipo Integer8 (IADsLargeInteger) a int.
-    Soporta: int, str numérico, y objetos COM con HighPart/LowPart.
-    """
     if val is None:
         return 0
 
@@ -66,7 +83,6 @@ def ad_largeint_to_int(val) -> int:
             return int(v)
         return 0
 
-    # IADsLargeInteger (COM): HighPart / LowPart
     if hasattr(val, "HighPart") and hasattr(val, "LowPart"):
         high = int(val.HighPart) & 0xFFFFFFFF
         low = int(val.LowPart) & 0xFFFFFFFF
@@ -93,32 +109,24 @@ def filetime_to_dt_str(filetime) -> str:
 
 
 def dt_to_filetime(dt_obj: datetime) -> int:
-    """
-    Convierte datetime (con tz) a Windows FILETIME (int).
-    """
     if dt_obj.tzinfo is None:
         dt_obj = dt_obj.replace(tzinfo=timezone.utc)
-    epoch_as_filetime = 11644473600  # seconds between 1601-01-01 and 1970-01-01
+    epoch_as_filetime = 11644473600
     return int((dt_obj.timestamp() + epoch_as_filetime) * 10_000_000)
 
 
 def is_locked(lockout_time, user_account_control=None) -> bool:
     if ad_largeint_to_int(lockout_time) > 0:
         return True
-
     try:
         if user_account_control is not None:
             return bool(int(user_account_control) & 0x10)
     except Exception:
         pass
-
     return False
 
 
 def is_enabled(user_account_control) -> str:
-    """
-    userAccountControl: si tiene el bit 0x2 => cuenta deshabilitada.
-    """
     try:
         uac = int(user_account_control)
         disabled = bool(uac & 2)
@@ -143,31 +151,7 @@ def format_group_dn_to_cn(dn: str) -> str:
         return dn
 
 
-def get_groups_from_dn(user_dn: str):
-    """
-    Obtiene grupos del usuario usando ADObject.from_dn + memberOf.
-    """
-    try:
-        obj = adobject.ADObject.from_dn(user_dn)
-        groups = obj.get_attribute("memberOf")
-
-        if not groups:
-            return []
-
-        if isinstance(groups, str):
-            groups = [groups]
-
-        clean = [format_group_dn_to_cn(dn) for dn in groups]
-        return sorted(clean, key=lambda x: x.lower())
-
-    except Exception as e:
-        return [f"Error obteniendo grupos: {e}"]
-
-
 def normalize_ad_text(val) -> str:
-    """
-    Convierte valores AD raros (tuple/list de 1, etc.) a string limpio.
-    """
     if val is None:
         return "—"
 
@@ -185,10 +169,6 @@ def normalize_ad_text(val) -> str:
 
 
 def dn_is_in_default_ou(dn: str) -> bool:
-    """
-    True si el objeto (computer) está exactamente debajo de OU=Default,OU=Global,DC=Teva,DC=Corp
-    Ej: CN=PC-01,OU=Default,OU=Global,DC=Teva,DC=Corp
-    """
     if not dn:
         return False
     dn_norm = dn.strip().lower()
@@ -196,9 +176,6 @@ def dn_is_in_default_ou(dn: str) -> bool:
 
 
 def dn_is_under_scope_ou(dn: str) -> bool:
-    """
-    True si el DN termina en ,SCOPE_OU_DN (está dentro del subtree del OU scope).
-    """
     if not dn:
         return False
     dn_norm = dn.strip().lower()
@@ -209,16 +186,10 @@ def dn_is_under_scope_ou(dn: str) -> bool:
 # Acciones AD
 # =====================================================
 def unlock_user_by_dn(user_dn: str) -> None:
-    """
-    Desbloquea una cuenta bloqueada seteando lockoutTime=0.
-    Intenta primero con pyad; si falla, hace fallback a ADSI (win32com).
-    """
     if not user_dn:
         raise ValueError("DN vacío: no se puede desbloquear.")
 
-    pythoncom.CoInitialize()
-    try:
-        # 1) pyad
+    with com_context():
         try:
             obj = adobject.ADObject.from_dn(user_dn)
 
@@ -231,15 +202,17 @@ def unlock_user_by_dn(user_dn: str) -> None:
 
             if hasattr(obj, "commit"):
                 obj.commit()
+
+            del obj
             return
 
         except Exception as e1:
-            # 2) ADSI fallback
             try:
                 import win32com.client
                 adsi = win32com.client.GetObject(f"LDAP://{user_dn}")
                 adsi.Put("lockoutTime", 0)
                 adsi.SetInfo()
+                del adsi
                 return
             except Exception as e2:
                 raise RuntimeError(
@@ -247,62 +220,38 @@ def unlock_user_by_dn(user_dn: str) -> None:
                     f"ADSI: {type(e2).__name__}: {e2}"
                 )
 
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
-
 
 def reset_password_by_dn(user_dn: str, new_password: str) -> None:
-    """
-    Resetea contraseña SIN forzar cambio al próximo logon.
-    Para asegurarlo, intenta setear pwdLastSet=-1 luego del cambio.
-    """
     if not user_dn:
         raise ValueError("DN vacío: no se puede resetear password.")
     if not new_password or len(new_password.strip()) < 6:
         raise ValueError("La contraseña es demasiado corta.")
 
-    pythoncom.CoInitialize()
-    try:
+    with com_context():
         import win32com.client
         user = win32com.client.GetObject(f"LDAP://{user_dn}")
         user.SetPassword(new_password)
 
-        # Garantiza "no forzar cambio al próximo logon"
         try:
             user.Put("pwdLastSet", -1)
         except Exception:
             pass
 
         user.SetInfo()
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+        del user
 
 
 def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
-    """
-    Mueve el objeto computer al OU destino.
-    """
     if not computer_dn:
         raise ValueError("DN vacío: no se puede mover equipo.")
     if not target_ou_dn:
         raise ValueError("OU destino vacío.")
 
-    pythoncom.CoInitialize()
-    try:
+    with com_context():
         import win32com.client
         target = win32com.client.GetObject(f"LDAP://{target_ou_dn}")
         target.MoveHere(f"LDAP://{computer_dn}", None)
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+        del target
 
 
 # =====================================================
@@ -313,7 +262,6 @@ def get_user_data(identifier: str):
         q = pyad.adquery.ADQuery()
 
         ident = safe_where_value(identifier)
-
         where = (
             f"sAMAccountName = '{ident}' OR "
             f"mail = '{ident}' OR "
@@ -365,11 +313,48 @@ def get_user_data(identifier: str):
             "Bloqueado": bloqueado,
             "Pwd last set": filetime_to_dt_str(row.get("pwdLastSet")),
             "Último logon (aprox.)": filetime_to_dt_str(row.get("lastLogonTimestamp")),
-            "Grupos": get_groups_from_dn(dn) if dn else []
         }
 
     except Exception as e:
         return {"error": str(e)}
+
+
+# =====================================================
+# Grupos (lazy-load) -> ADQuery memberOf
+# =====================================================
+def get_groups_from_dn(user_dn: str):
+    if not user_dn:
+        return []
+
+    try:
+        q = pyad.adquery.ADQuery()
+        dn_safe = safe_where_value(user_dn)
+
+        q.execute_query(
+            attributes=["memberOf"],
+            where_clause=f"distinguishedName = '{dn_safe}'"
+        )
+
+        results = list(q.get_results())
+        if not results:
+            return []
+
+        groups = results[0].get("memberOf")
+        if not groups:
+            return []
+
+        if isinstance(groups, str):
+            groups_list = [groups]
+        elif isinstance(groups, (list, tuple)):
+            groups_list = [g for g in groups if g]
+        else:
+            groups_list = [str(groups)]
+
+        clean = [format_group_dn_to_cn(dn) for dn in groups_list if dn]
+        return sorted(clean, key=lambda x: x.lower())
+
+    except Exception as e:
+        return [f"Error obteniendo grupos: {e}"]
 
 
 # =====================================================
@@ -427,19 +412,10 @@ def get_computer_data(samname: str):
 
 
 # =====================================================
-# Reportes (inactivos) -> Streamlit DataFrame
+# Reportes (inactivos)
 # =====================================================
 def fetch_inactives(kind: str, days: int):
-    """
-    kind: 'Usuarios' o 'Equipos'
-    days: inactividad por lastLogonTimestamp (aprox, replicado)
-
-    1) Intentamos consultar subtree usando base_dn=SCOPE_OU_DN.
-    2) Si el provider/base_dn falla, consultamos global y filtramos por DN en Python.
-    3) Filtramos por lastLogonTimestamp en Python (Integer8), evitando ADO WHERE con <=.
-    """
-    pythoncom.CoInitialize()
-    try:
+    with com_context():
         q = pyad.adquery.ADQuery()
 
         cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=int(days))
@@ -458,7 +434,6 @@ def fetch_inactives(kind: str, days: int):
             ]
             where = "objectCategory='computer'"
 
-        # --- 1) Try subtree query with base_dn ---
         rows = []
         try:
             q.execute_query(attributes=attrs, where_clause=where, base_dn=SCOPE_OU_DN)
@@ -468,16 +443,13 @@ def fetch_inactives(kind: str, days: int):
         except Exception:
             rows = []
 
-        # --- 2) Fallback: query global y filtramos por DN en Python ---
         if not rows:
             q = pyad.adquery.ADQuery()
             q.execute_query(attributes=attrs, where_clause=where)
             all_rows = list(q.get_results())
             rows = [r for r in all_rows if dn_is_under_scope_ou(r.get("distinguishedName", ""))]
 
-        # --- 3) Filtrado por lastLogonTimestamp en Python ---
         clean = []
-
         for r in rows:
             dn = (r.get("distinguishedName") or "")
             if not dn_is_under_scope_ou(dn):
@@ -519,11 +491,75 @@ def fetch_inactives(kind: str, days: int):
 
         return clean
 
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+
+# =====================================================
+# Export helpers (usuario + grupos)
+# =====================================================
+_INTERNAL_KEYS = {"_dn", "_bloqueado_bool", "_uac", "_lockoutTime_raw", "_lockoutTime_int"}
+
+def build_user_export_txt(user_data: dict, groups: list[str]) -> bytes:
+    lines = []
+    lines.append("Consulta AD - Export (usuario + grupos)")
+    lines.append(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    lines.append("")
+
+    for k, v in user_data.items():
+        if k in _INTERNAL_KEYS:
+            continue
+        lines.append(f"{k}: {v}")
+
+    lines.append("")
+    lines.append(f"Grupos ({len(groups)}):")
+    if groups:
+        for g in groups:
+            lines.append(f"- {g}")
+    else:
+        lines.append("- (sin grupos)")
+
+    return ("\n".join(lines)).encode("utf-8")
+
+
+def build_user_export_csv(user_data: dict, groups: list[str]) -> bytes:
+    flat = {k: v for k, v in user_data.items() if k not in _INTERNAL_KEYS}
+    flat["Grupos"] = "; ".join(groups) if groups else ""
+    df = pd.DataFrame([flat])
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def reset_user_caches_for_dn(dn: str):
+    # grupos
+    st.session_state["groups_dn"] = dn
+    st.session_state.pop("groups_list", None)
+    st.session_state.pop("groups_error", None)
+
+    # export
+    st.session_state.pop("export_txt_bytes", None)
+    st.session_state.pop("export_csv_bytes", None)
+    st.session_state.pop("export_stamp", None)
+    st.session_state.pop("export_stamp_dn", None)
+
+
+def ensure_export_ready(dn: str, user_data: dict):
+    """
+    Genera y cachea bytes TXT/CSV usando grupos ya cargados.
+    Evita re-generar en cada rerun.
+    """
+    if not dn:
+        return
+
+    grupos = st.session_state.get("groups_list")
+    if grupos is None:
+        return
+
+    if st.session_state.get("export_stamp_dn") != dn or "export_stamp" not in st.session_state:
+        st.session_state["export_stamp_dn"] = dn
+        st.session_state["export_stamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if "export_txt_bytes" not in st.session_state:
+        st.session_state["export_txt_bytes"] = build_user_export_txt(user_data, grupos or [])
+
+    if "export_csv_bytes" not in st.session_state:
+        st.session_state["export_csv_bytes"] = build_user_export_csv(user_data, grupos or [])
 
 
 # =====================================================
@@ -566,10 +602,6 @@ def render_card(k, v):
 
 
 def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
-    """
-    Arreglo: el botón queda al lado de la “píldora” (misma fila),
-    y solo aparece si está bloqueado.
-    """
     if bloqueado_bool:
         pill = "<span style='color:#ff4c4c; font-weight:bold;'>🔴 Sí</span>"
     else:
@@ -597,16 +629,20 @@ def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
 
     with col_right:
         if bloqueado_bool:
+            # Botón más claro y directo
             st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-            if st.button(
-                "🔓 Desbloquear",
-                key=stable_key("unlock", dn),
-                use_container_width=True
-            ):
+            if st.button("🔓 Desbloquear", key=stable_key("unlock", dn), use_container_width=True, type="primary"):
                 try:
                     unlock_user_by_dn(dn)
+
+                    # Actualizamos el UI localmente (sin obligar a re-consultar AD)
+                    if "data" in st.session_state and isinstance(st.session_state["data"], dict):
+                        st.session_state["data"]["_bloqueado_bool"] = False
+                        st.session_state["data"]["Bloqueado"] = "No"
+                        st.session_state["data"]["_lockoutTime_int"] = 0
+                        st.session_state["data"]["_lockoutTime_raw"] = 0
+
                     st.success("Usuario desbloqueado (lockoutTime = 0).")
-                    run_search("Usuario", criterio)
                     st.rerun()
                 except Exception as e:
                     st.error(f"No se pudo desbloquear: {type(e).__name__}: {e}")
@@ -634,8 +670,11 @@ def render_reset_password_card(dn: str, criterio: str):
         unsafe_allow_html=True
     )
 
-    p1 = st.text_input("Nueva contraseña", type="password", key=stable_key("pwd1", dn))
-    p2 = st.text_input("Confirmar contraseña", type="password", key=stable_key("pwd2", dn))
+    p1_key = stable_key("pwd1", dn)
+    p2_key = stable_key("pwd2", dn)
+
+    p1 = st.text_input("Nueva contraseña", type="password", key=p1_key)
+    p2 = st.text_input("Confirmar contraseña", type="password", key=p2_key)
 
     colA, colB = st.columns(2)
     with colA:
@@ -653,9 +692,11 @@ def render_reset_password_card(dn: str, criterio: str):
                 return
 
             reset_password_by_dn(dn, p1)
+
+            st.session_state[p1_key] = ""
+            st.session_state[p2_key] = ""
+
             st.success("Contraseña reseteada correctamente.")
-            run_search("Usuario", criterio)
-            st.rerun()
         except Exception as e:
             st.error(f"No se pudo resetear: {type(e).__name__}: {e}")
 
@@ -683,22 +724,16 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str):
         unsafe_allow_html=True
     )
 
-    if st.button(
-        "📁 Mover a Global / Clients / AR / MRO / WKS",
-        key=stable_key("movepc", dn),
-        use_container_width=True
-    ):
+    if st.button("📁 Mover a Global / Clients / AR / MRO / WKS", key=stable_key("movepc", dn), use_container_width=True):
         try:
             move_computer_to_target_ou(dn, TARGET_WKS_OU_DN)
             st.success("Equipo movido al OU objetivo.")
-            run_search("Equipo", criterio)
-            st.rerun()
         except Exception as e:
             st.error(f"No se pudo mover: {type(e).__name__}: {e}")
 
 
 # =====================================================
-# Búsqueda (helper)
+# Búsqueda
 # =====================================================
 def run_search(modo: str, criterio: str):
     criterio = (criterio or "").strip()
@@ -706,18 +741,12 @@ def run_search(modo: str, criterio: str):
         st.warning("Ingresá un valor para buscar.")
         return
 
-    pythoncom.CoInitialize()
-    try:
+    with com_context():
         with st.spinner("Consultando Active Directory…"):
             if modo == "Usuario":
                 data = get_user_data(criterio)
             else:
                 data = get_computer_data(criterio)
-    finally:
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
 
     st.session_state["last_modo"] = modo
     st.session_state["last_criterio"] = criterio
@@ -733,7 +762,6 @@ with st.sidebar:
     st.header("🔎 Consulta AD")
 
     modo = st.radio("¿Qué querés hacer?", ["Usuario", "Equipo", "Reportes"], key="modo_radio")
-
     debug = st.checkbox("🧪 Modo debug", value=False)
 
     if modo in ("Usuario", "Equipo"):
@@ -786,10 +814,8 @@ if modo in ("Usuario", "Equipo"):
 
     last_modo = st.session_state.get("last_modo", modo)
     last_criterio = st.session_state.get("last_criterio", "")
-
     st.success(f"{last_modo} encontrado:")
 
-    # Debug
     if last_modo == "Usuario" and debug:
         with st.expander("🧪 Debug AD"):
             st.write("**DN:**", data.get("_dn"))
@@ -805,21 +831,20 @@ if modo in ("Usuario", "Equipo"):
             st.write("**Default OU DN:**", DEFAULT_COMPUTERS_OU_DN)
             st.write("**Target OU DN:**", TARGET_WKS_OU_DN)
 
-    # Layout
     if last_modo == "Usuario":
         dn = data.get("_dn", "")
         bloqueado_bool = bool(data.get("_bloqueado_bool", False))
 
-        visibles = {
-            k: v for k, v in data.items()
-            if k not in ("Grupos", "_dn", "_bloqueado_bool", "_uac", "_lockoutTime_raw", "_lockoutTime_int")
-        }
+        # si cambia el usuario, limpiamos caches (grupos/export)
+        if dn and st.session_state.get("groups_dn") != dn:
+            reset_user_caches_for_dn(dn)
+
+        visibles = {k: v for k, v in data.items() if k not in _INTERNAL_KEYS}
 
         left_keys = ["Usuario", "Nombre", "Mail", "UPN", "Descripción", "Bloqueado"]
         right_keys = ["Creado", "Modificado", "Habilitado", "Pwd last set", "Último logon (aprox.)", "OU"]
 
         col1, col2 = st.columns(2)
-
         with col1:
             for k in left_keys:
                 if k not in visibles:
@@ -828,9 +853,6 @@ if modo in ("Usuario", "Equipo"):
                     render_bloqueado_row(bloqueado_bool, dn, last_criterio)
                 else:
                     render_card(k, visibles[k])
-
-            if dn:
-                render_reset_password_card(dn, last_criterio)
 
         with col2:
             for k in right_keys:
@@ -842,13 +864,68 @@ if modo in ("Usuario", "Equipo"):
             for k in extra:
                 render_card(k, visibles[k])
 
-        # Grupos
-        grupos = data.get("Grupos", [])
-        with st.expander("📁 Ver grupos del usuario"):
-            if grupos:
-                st.write(f"Total grupos: **{len(grupos)}**")
+        st.markdown("---")
 
-                colA, colB, colC = st.columns(3)
+        # Acciones (password dentro de expander)
+        with st.expander("🔑 Acciones", expanded=False):
+            if dn:
+                render_reset_password_card(dn, last_criterio)
+            else:
+                st.info("No hay DN para ejecutar acciones.")
+
+        # Grupos + Export (en el MISMO expander)
+        with st.expander("📁 Ver grupos del usuario", expanded=False):
+            if not dn:
+                st.write("No hay DN para este usuario.")
+                st.stop()
+
+            grupos = st.session_state.get("groups_list")
+            groups_error = st.session_state.get("groups_error")
+
+            if grupos is None and not groups_error:
+                if st.button("📥 Cargar grupos", key=stable_key("loadgroups", dn), use_container_width=True, type="primary"):
+                    with com_context():
+                        with st.spinner("Leyendo grupos desde Active Directory…"):
+                            g = get_groups_from_dn(dn)
+
+                    if g and isinstance(g, list) and str(g[0]).startswith("Error obteniendo grupos:"):
+                        st.session_state["groups_error"] = g[0]
+                        st.session_state["groups_list"] = []
+                    else:
+                        st.session_state["groups_list"] = g or []
+                        st.session_state["groups_error"] = None
+
+                    # Al cargar grupos, preparamos export automáticamente
+                    ensure_export_ready(dn, data)
+                    st.rerun()
+
+                st.caption("Tip: puede demorar si el usuario tiene muchos grupos.")
+                st.stop()
+
+            if groups_error:
+                st.error(groups_error)
+
+            grupos = st.session_state.get("groups_list") or []
+            st.write(f"Total grupos: **{len(grupos)}**")
+
+            colR1, colR2 = st.columns([1, 3])
+            with colR1:
+                if st.button("🔄 Refrescar", key=stable_key("refgroups", dn), use_container_width=True):
+                    st.session_state.pop("groups_list", None)
+                    st.session_state.pop("groups_error", None)
+                    st.session_state.pop("export_txt_bytes", None)
+                    st.session_state.pop("export_csv_bytes", None)
+                    st.session_state.pop("export_stamp", None)
+                    st.session_state.pop("export_stamp_dn", None)
+                    st.rerun()
+            with colR2:
+                st.caption("Refresca la lista desde AD.")
+
+            # Lista de grupos (píldoras)
+            if len(grupos) == 0:
+                st.write("El usuario no pertenece a ningún grupo.")
+            else:
+                gcol1, gcol2, gcol3 = st.columns(3)
                 for i, g in enumerate(grupos):
                     g_safe = html.escape(str(g))
                     pill = f"""
@@ -865,13 +942,43 @@ if modo in ("Usuario", "Equipo"):
                     </div>
                     """
                     if i % 3 == 0:
-                        colA.markdown(pill, unsafe_allow_html=True)
+                        gcol1.markdown(pill, unsafe_allow_html=True)
                     elif i % 3 == 1:
-                        colB.markdown(pill, unsafe_allow_html=True)
+                        gcol2.markdown(pill, unsafe_allow_html=True)
                     else:
-                        colC.markdown(pill, unsafe_allow_html=True)
+                        gcol3.markdown(pill, unsafe_allow_html=True)
+
+            # Export: aparece automáticamente porque ya hay grupos cargados
+            ensure_export_ready(dn, data)
+            st.markdown("### ⬇️ Exportar usuario + grupos")
+
+            export_txt = st.session_state.get("export_txt_bytes")
+            export_csv = st.session_state.get("export_csv_bytes")
+            stamp = st.session_state.get("export_stamp") or datetime.now().strftime("%Y%m%d_%H%M%S")
+            user_sam = str(visibles.get("Usuario", "usuario")).replace("$", "")
+
+            if not export_txt or not export_csv:
+                st.caption("Export no listo (volver a cargar grupos).")
             else:
-                st.write("El usuario no pertenece a ningún grupo.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.download_button(
+                        "✅ Descargar TXT (con grupos)",
+                        data=export_txt,
+                        file_name=f"{user_sam}_export_con_grupos_{stamp}.txt",
+                        mime="text/plain",
+                        use_container_width=True,
+                        key=stable_key("dl_txt_full", dn),
+                    )
+                with c2:
+                    st.download_button(
+                        "✅ Descargar CSV (con grupos)",
+                        data=export_csv,
+                        file_name=f"{user_sam}_export_con_grupos_{stamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=stable_key("dl_csv_full", dn),
+                    )
 
     else:
         # Equipo
@@ -881,7 +988,6 @@ if modo in ("Usuario", "Equipo"):
         visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
 
         col1, col2 = st.columns(2)
-
         with col1:
             if dn and in_default:
                 render_move_computer_card(in_default, dn, last_criterio)
@@ -897,11 +1003,8 @@ if modo in ("Usuario", "Equipo"):
             for k, v in items[mid:]:
                 render_card(k, v)
 
-
-# =====================================================
-# Reportes
-# =====================================================
 else:
+    # Reportes
     if "ejecutar_rep" in locals() and ejecutar_rep:
         with st.spinner("Generando reporte…"):
             rep = fetch_inactives(tipo_rep, int(dias))
