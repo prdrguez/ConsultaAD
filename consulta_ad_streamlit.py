@@ -590,34 +590,45 @@ def unlock_user_by_dn(user_dn: str) -> None:
         comandos AD CLI no están siempre disponibles.
     """
     if not user_dn:
+        logger.warning("Intento de desbloqueo con DN vacío")
         raise ValueError("DN vacío: no se puede desbloquear.")
+
+    logger.info(f"🔓 Iniciando desbloqueo de usuario: {user_dn[:50]}...")
 
     with com_context():
         try:
+            logger.debug("Intento 1: Usando pyad.ADObject")
             obj = adobject.ADObject.from_dn(user_dn)
 
             if hasattr(obj, "update_attribute"):
                 obj.update_attribute("lockoutTime", 0)
+                logger.debug("Atributo lockoutTime actualizado con update_attribute")
             elif hasattr(obj, "set_attribute"):
                 obj.set_attribute("lockoutTime", 0)
+                logger.debug("Atributo lockoutTime actualizado con set_attribute")
             else:
                 raise AttributeError("pyad no expone update_attribute/set_attribute")
 
             if hasattr(obj, "commit"):
                 obj.commit()
+                logger.info("✓ Usuario desbloqueado exitosamente (pyad)")
 
             del obj
             return
 
         except Exception as e1:
+            logger.debug(f"pyad falló: {type(e1).__name__}: {e1}. Intentando ADSI fallback...")
             try:
                 import win32com.client
+                logger.debug("Intento 2: Usando win32com.client ADSI")
                 adsi = win32com.client.GetObject(f"LDAP://{user_dn}")
                 adsi.Put("lockoutTime", 0)
                 adsi.SetInfo()
+                logger.info("✓ Usuario desbloqueado exitosamente (ADSI fallback)")
                 del adsi
                 return
             except Exception as e2:
+                logger.error(f"✗ Desbloqueo fallido. pyad: {type(e1).__name__}: {e1} | ADSI: {type(e2).__name__}: {e2}", exc_info=True)
                 raise RuntimeError(
                     f"Unlock falló. pyad: {type(e1).__name__}: {e1} | "
                     f"ADSI: {type(e2).__name__}: {e2}"
@@ -644,23 +655,37 @@ def reset_password_by_dn(user_dn: str, new_password: str) -> None:
         para SetPassword). Típicamente funciona en red corporativa Teva.
     """
     if not user_dn:
+        logger.warning("Intento de reset de password con DN vacío")
         raise ValueError("DN vacío: no se puede resetear password.")
     if not new_password or len(new_password.strip()) < 6:
+        logger.warning(f"Intento de reset con password demasiado corta (len={len(new_password or '')})")
         raise ValueError("La contraseña es demasiado corta.")
+
+    logger.info(f"🔐 Iniciando reset de contraseña: {user_dn[:50]}...")
 
     with com_context():
         import win32com.client
-        user = win32com.client.GetObject(f"LDAP://{user_dn}")
-        user.SetPassword(new_password)
-
-        # Garantiza "no forzar cambio al próximo logon"
         try:
-            user.Put("pwdLastSet", -1)
-        except Exception:
-            pass
+            logger.debug("Conectando a usuario via ADSI")
+            user = win32com.client.GetObject(f"LDAP://{user_dn}")
+            
+            logger.debug("Ejecutando SetPassword()")
+            user.SetPassword(new_password)
 
-        user.SetInfo()
-        del user
+            # Garantiza "no forzar cambio al próximo logon"
+            try:
+                logger.debug("Configurando pwdLastSet = -1 (no forzar cambio)")
+                user.Put("pwdLastSet", -1)
+            except Exception as e:
+                logger.debug(f"No se pudo configurar pwdLastSet: {e} (no crítico)")
+                pass
+
+            user.SetInfo()
+            logger.info("✓ Contraseña reseteada exitosamente")
+            del user
+        except Exception as e:
+            logger.error(f"✗ Reset de contraseña falló: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
 
 def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
@@ -683,15 +708,29 @@ def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
         move_computer_to_target_ou(from_dn, to_dn)
     """
     if not computer_dn:
+        logger.warning("Intento de mover equipo con DN vacío")
         raise ValueError("DN vacío: no se puede mover equipo.")
     if not target_ou_dn:
+        logger.warning("Intento de mover equipo a OU vacía")
         raise ValueError("OU destino vacío.")
+
+    logger.info(f"📦 Iniciando movimiento de equipo: {computer_dn[:50]}...")
+    logger.debug(f"OU destino: {target_ou_dn[:80]}...")
 
     with com_context():
         import win32com.client
-        target = win32com.client.GetObject(f"LDAP://{target_ou_dn}")
-        target.MoveHere(f"LDAP://{computer_dn}", None)
-        del target
+        try:
+            logger.debug("Conectando a OU destino via ADSI")
+            target = win32com.client.GetObject(f"LDAP://{target_ou_dn}")
+            
+            logger.debug(f"Ejecutando MoveHere: {computer_dn[:40]}... → {target_ou_dn[:40]}...")
+            target.MoveHere(f"LDAP://{computer_dn}", None)
+            
+            logger.info("✓ Equipo movido exitosamente")
+            del target
+        except Exception as e:
+            logger.error(f"✗ Movimiento de equipo falló: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
 
 # =====================================================
@@ -739,6 +778,8 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
         lastLogonTimestamp es aproximado (se replica entre DCs).
     """
     try:
+        logger.debug(f"Iniciando búsqueda de usuario: {identifier[:20]}...")
+        
         q = pyad.adquery.ADQuery()
 
         ident = safe_where_value(identifier)
@@ -748,6 +789,8 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
             f"userPrincipalName = '{ident}'"
         )
 
+        logger.debug(f"Query LDAP ejecutada: {where[:60]}...")
+        
         q.execute_query(
             attributes=[
                 "distinguishedName", "sAMAccountName", "mail", "userPrincipalName",
@@ -759,9 +802,11 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
 
         results = list(q.get_results())
         if not results:
+            logger.info(f"Usuario no encontrado: {identifier}")
             return None
 
         row = results[0]
+        logger.info(f"✓ Usuario encontrado: {row.get('sAMAccountName')}")
 
         dn = row.get("distinguishedName", "")
         creado = format_dt(row.get("whenCreated"))
@@ -773,6 +818,8 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
         bloqueado_bool = is_locked(lockout_raw, uac_raw)
         bloqueado = "Sí" if bloqueado_bool else "No"
         habilitado = is_enabled(uac_raw)
+        
+        logger.debug(f"Bloqueado={bloqueado}, Habilitado={habilitado}, OU={extract_ou(dn)}")
 
         return {
             "_dn": dn,
@@ -796,6 +843,7 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
         }
 
     except Exception as e:
+        logger.error(f"✗ Error buscando usuario '{identifier}': {type(e).__name__}: {e}", exc_info=True)
         return {"error": str(e)}
 
 
@@ -823,12 +871,15 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
         memberOf contiene DNs completos; extrae solo el CN.
     """
     if not user_dn:
+        logger.debug("get_groups_from_dn llamado con DN vacío")
         return []
 
     try:
+        logger.debug(f"Obteniendo grupos para: {user_dn[:50]}...")
         q = pyad.adquery.ADQuery()
         dn_safe = safe_where_value(user_dn)
 
+        logger.debug("Ejecutando query de memberOf")
         q.execute_query(
             attributes=["memberOf"],
             where_clause=f"distinguishedName = '{dn_safe}'"
@@ -836,10 +887,12 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
 
         results = list(q.get_results())
         if not results:
+            logger.debug("No se encontraron resultados para el usuario")
             return []
 
         groups = results[0].get("memberOf")
         if not groups:
+            logger.debug("Usuario sin grupos asignados")
             return []
 
         if isinstance(groups, str):
@@ -850,9 +903,11 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
             groups_list = [str(groups)]
 
         clean = [format_group_dn_to_cn(dn) for dn in groups_list if dn]
+        logger.info(f"✓ {len(clean)} grupos encontrados para usuario")
         return sorted(clean, key=lambda x: x.lower())
 
     except Exception as e:
+        logger.error(f"✗ Error obteniendo grupos: {type(e).__name__}: {e}", exc_info=True)
         return [f"Error obteniendo grupos: {e}"]
 
 
@@ -891,7 +946,10 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
     """
     try:
         if not samname:
+            logger.debug("Búsqueda de equipo sin SAMAccountName válido")
             return None
+
+        logger.debug(f"Búsqueda de equipo iniciada: {samname[:30]}")
 
         sam = samname.strip()
         if not sam.endswith("$"):
@@ -899,6 +957,8 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
 
         sam_safe = safe_where_value(sam)
 
+        logger.debug(f"Query LDAP para equipo: sAMAccountName='{sam_safe}'")
+        
         q = pyad.adquery.ADQuery()
         q.execute_query(
             attributes=[
@@ -911,15 +971,18 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
 
         results = list(q.get_results())
         if not results:
+            logger.info(f"Equipo no encontrado: {samname}")
             return None
 
         row = results[0]
+        logger.info(f"✓ Equipo encontrado: {row.get('sAMAccountName')}")
 
         dn = row.get("distinguishedName", "")
         creado = format_dt(row.get("whenCreated"))
         modificado = format_dt(row.get("whenChanged"))
 
         in_default = dn_is_in_default_ou(dn)
+        logger.debug(f"Equipo en OU Default={in_default}, OU={extract_ou(dn)}")
 
         return {
             "_dn": dn,
@@ -936,6 +999,7 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
         }
 
     except Exception as e:
+        logger.error(f"✗ Error buscando equipo '{samname}': {type(e).__name__}: {e}", exc_info=True)
         return {"error": str(e)}
 
 
@@ -968,11 +1032,14 @@ def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
         - lastLogonTimestamp es aproximado, replicado entre DCs
         - Util para campañas de higiene cada 30/60/90 días
     """
+    logger.info(f"📊 Iniciando reporte de inactividad: {kind} > {days} días")
+    
     with com_context():
         q = pyad.adquery.ADQuery()
 
         cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=int(days))
         cutoff_ft = dt_to_filetime(cutoff_dt)
+        logger.debug(f"Criterio de inactividad: lastLogonTimestamp < {cutoff_dt.isoformat()}")
 
         if kind == "Usuarios":
             attrs = [
@@ -987,20 +1054,28 @@ def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
             ]
             where = "objectCategory='computer'"
 
+        logger.debug(f"Query filter: {where}")
+
         rows = []
         try:
+            logger.debug(f"Ejecutando query en SCOPE_OU_DN: {SCOPE_OU_DN[:60]}...")
             q.execute_query(attributes=attrs, where_clause=where, base_dn=SCOPE_OU_DN)
             rows = list(q.get_results())
+            logger.debug(f"Query SCOPE_OU_DN completada: {len(rows)} resultados")
         except TypeError:
+            logger.debug("TypeError en query SCOPE_OU_DN, intentando sin base_dn")
             rows = []
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Excepción en query SCOPE_OU_DN: {type(e).__name__}: {e}")
             rows = []
 
         if not rows:
+            logger.debug("Query SCOPE_OU_DN sin resultados, filtrando desde búsqueda global")
             q = pyad.adquery.ADQuery()
             q.execute_query(attributes=attrs, where_clause=where)
             all_rows = list(q.get_results())
             rows = [r for r in all_rows if dn_is_under_scope_ou(r.get("distinguishedName", ""))]
+            logger.debug(f"Resultados globales filtrados por SCOPE_OU: {len(rows)} elementos")
 
         clean = []
         for r in rows:
