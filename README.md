@@ -1,52 +1,101 @@
-# Consulta AD — small Streamlit admin UI
+# Consulta AD — Aplicación Streamlit para Active Directory
 
 Pequeña aplicación Streamlit para consultar Active Directory (buscar usuarios/equipos, desbloquear cuentas, resetear contraseñas y mover equipos entre OUs).
 
 **Importante:** la app requiere acceso a un Active Directory de Windows y paquetes que dependen de pywin32 (`pythoncom`). Correr la app completa requiere un host Windows con conectividad a AD.
 
-## Archivos clave
-- `consulta_ad_streamlit.py` — aplicación principal (lógica AD + UI).
+## 📋 Archivos Clave
+- `consulta_ad_streamlit.py` — aplicación principal (lógica AD + UI Streamlit).
 - `consulta_ad_streamlit.bat` — wrapper rápido para Windows.
+- `DOCUMENTACION.md` — **documentación completa de código, arquitectura y uso** ← LEER ESTO
 - `.github/copilot-instructions.md` — guía para agentes AI y colaboradores.
 - `.github/workflows/ci-windows.yml` — ejemplo de CI que corre tests en Windows (usa mocks).
 - `tests/test_ci_mocks.py` — tests que inyectan mocks para `pyad`, `pythoncom` y `win32com.client`.
 - `requirements.txt` — dependencias mínimas para desarrollo/CI.
 
-## Requisitos
+## 🎯 Características
+
+### Búsqueda de Usuarios
+- Busca por **sAMAccountName**, **mail** o **UPN**
+- Muestra atributos: nombre, descripción, OU, estado de habilitación, último logon, etc
+- **Desbloquear usuario** (si está bloqueado)
+- **Resetear contraseña** con validación de fortaleza
+- **Ver grupos** del usuario (carga diferida)
+- **Exportar** usuario + grupos a TXT/CSV
+
+### Búsqueda de Equipos
+- Busca por **SAMAccountName**
+- Muestra atributos: DNS, Sistema Operativo, OU, último logon, etc
+- **Mover a OU objetivo** si está en OU Default
+
+### Reportes de Inactividad
+- Usuarios o equipos sin acceso hace **N días** (30, 60, 90, 120, 180, 365)
+- Basado en `lastLogonTimestamp` (aproximado, replicado entre DCs)
+- Útil para **campañas de higiene** de directorio
+
+## 📦 Requisitos
 - Windows (para uso real contra AD).
 - Python 3.8+ (se probó con 3.11 en CI).
 - Paquetes: ver `requirements.txt`. Para ejecutar funciones que hacen writes sobre AD necesitarás `pyad` y `pywin32` instalados y permisos de dominio.
 
-## Ejecutar localmente (Windows)
-1. Crear y activar un virtualenv (PowerShell):
+## 🚀 Ejecutar Localmente (Windows)
+
+### Opción 1: PowerShell
 ```powershell
+# 1. Crear y activar virtualenv
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-2. Instalar dependencias:
-```powershell
+
+# 2. Instalar dependencias
 pip install -r requirements.txt
-# instalar opcionalmente pyad/pywin32 si vas a ejecutar contra AD
+
+# 3. (Opcional) Instalar dependencias AD si vas a consultar contra AD real
 pip install pyad pywin32
-```
-3. Ejecutar la app:
-```powershell
+
+# 4. Ejecutar la app
 streamlit run consulta_ad_streamlit.py
 ```
 
-### Alternativa: script CMD (Windows)
-
-También se incluye un script `setup_env.bat` para usuarios que prefieren CMD.
-
-Ejecutar sin dependencias AD:
-```bat
+### Opción 2: Batch Script (Windows CMD)
+```batch
 setup_env.bat
 ```
 
-Instalar también dependencias para AD (pyad/pywin32):
-```bat
+O instalar con dependencias AD:
+```batch
 setup_env.bat -InstallAdDeps
 ```
+
+### Opción 3: Quick Run (si virtualenv ya existe)
+```batch
+consulta_ad_streamlit.bat
+```
+
+## 📖 Documentación del Código
+
+Toda la documentación detallada está en [**DOCUMENTACION.md**](DOCUMENTACION.md), incluyendo:
+
+- ✅ **Arquitectura**: componentes, funciones principales, flujos
+- ✅ **Estructura de datos**: qué retorna cada función
+- ✅ **Constantes AD**: DOMAIN_DN, OUs, alcances
+- ✅ **Session State**: cómo Streamlit persiste datos
+- ✅ **Notas sobre AD**: atributos especiales, búsqueda, reportes
+- ✅ **Seguridad**: validación, escapado, manejo de errores
+- ✅ **Debugging**: modo debug, errores comunes
+
+### Resumen rápido de funciones principales
+
+| Función | Descripción |
+|---------|-------------|
+| `get_user_data(identifier)` | Busca usuario por sAMAccountName/mail/UPN |
+| `get_computer_data(samname)` | Busca equipo por SAMAccountName |
+| `get_groups_from_dn(dn)` | Obtiene grupos de un usuario (lazy-load) |
+| `unlock_user_by_dn(dn)` | Desbloquea usuario (lockoutTime=0) |
+| `reset_password_by_dn(dn, pwd)` | Reseta contraseña del usuario |
+| `move_computer_to_target_ou(dn, target_ou)` | Mueve equipo entre OUs |
+| `fetch_inactives(kind, days)` | Genera reporte de inactividad |
+| `generate_temp_password()` | Genera contraseña segura aleatoria |
+
 
 
 ## Tests (sin AD)

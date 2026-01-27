@@ -1,3 +1,25 @@
+"""
+Consulta AD - Aplicación Streamlit para consultar Active Directory Teva Corp.
+
+Descripción:
+    Interfaz web interactiva para consultar usuarios, equipos y generar reportes 
+    de inactividad desde Active Directory. Incluye operaciones privilegiadas como:
+    - Desbloquear usuarios
+    - Resetear contraseñas
+    - Mover equipos entre OUs
+    - Exportar datos de usuarios con membresía de grupos
+
+Requisitos:
+    - streamlit, pyad, pywin32, pandas
+    - Acceso a red AD (dominio Teva.Corp)
+    - Permisos de dominio para operaciones de escritura
+
+Uso:
+    streamlit run consulta_ad_streamlit.py
+    o
+    consulta_ad_streamlit.bat (Windows)
+"""
+
 import streamlit as st
 import pyad.adquery
 import pythoncom
@@ -5,20 +27,38 @@ import html
 import pandas as pd
 import hashlib
 from datetime import datetime, timezone, timedelta
-from pyad import adobject
 from contextlib import contextmanager
 import threading
+import secrets
+import string
+from pyad import adobject
 
 
 # =====================================================
-# COM context (evita CoInitialize/CoUninitialize desparejos)
+# COM context management (evita CoInitialize/CoUninitialize desparejos)
 # =====================================================
+"""
+Administración segura de contexto COM para operaciones LDAP/ADSI.
+Usa refcounting para permitir llamadas anidadas sin desininicializar prematuramente.
+"""
 _COM_LOCK = threading.Lock()
 _COM_DEPTH = 0
 
 
 @contextmanager
 def com_context():
+    """
+    Context manager thread-safe para COM (Component Object Model) de Windows.
+    
+    Garantiza:
+    - Una sola CoInitialize() por thread
+    - CoUninitialize() solo cuando se salen todos los contextos anidados
+    - Thread-safety con lock
+    
+    Ejemplo:
+        with com_context():
+            obj = adobject.ADObject.from_dn("CN=User,DC=Teva,DC=Corp")
+    """
     global _COM_DEPTH
     with _COM_LOCK:
         if _COM_DEPTH == 0:
@@ -38,8 +78,17 @@ def com_context():
 
 
 # =====================================================
-# Config AD (Teva.Corp)
+# Configuración de dominio AD (Teva.Corp)
 # =====================================================
+"""
+Constantes que definen la estructura del dominio y OUs en Active Directory Teva.
+
+DOMAIN_DN:              DN raíz del dominio
+DEFAULT_COMPUTERS_OU_DN: OU donde se crean computadoras por defecto
+TARGET_WKS_OU_DN:       OU objetivo para mover workstations
+SCOPE_OU_DN:            Alcance para reportes de inactividad
+"""
+
 DOMAIN_DN = "DC=Teva,DC=Corp"
 
 DEFAULT_COMPUTERS_OU_DN = f"OU=Default,OU=Global,{DOMAIN_DN}"
@@ -48,9 +97,23 @@ SCOPE_OU_DN = f"OU=MRO,OU=AR,OU=Clients,OU=Global,{DOMAIN_DN}"
 
 
 # =====================================================
-# Helpers
+# Funciones auxiliares (parsing y formateo)
 # =====================================================
+
 def safe_where_value(val: str) -> str:
+    """
+    Escapa caracteres especiales para usar en filtros LDAP WHERE.
+    
+    Args:
+        val: Valor a escapar (se convierte a string)
+    
+    Returns:
+        String escapado, seguro para usar en where_clause
+        
+    Ejemplo:
+        val = "O'Brien"
+        seguro = safe_where_value(val)  # "O''Brien"
+    """
     if val is None:
         return ""
     val = str(val).strip()
@@ -58,6 +121,15 @@ def safe_where_value(val: str) -> str:
 
 
 def format_dt(dt_obj) -> str:
+    """
+    Formatea un datetime a string legible en formato DD/MM/YYYY HH:MM.
+    
+    Args:
+        dt_obj: Objeto datetime
+    
+    Returns:
+        String formateado o "Desconocido" si hay error
+    """
     try:
         return dt_obj.strftime("%d/%m/%Y %H:%M")
     except Exception:
@@ -65,12 +137,48 @@ def format_dt(dt_obj) -> str:
 
 
 def stable_key(prefix: str, seed: str) -> str:
+    """
+    Genera una clave estable y reproducible para widgets de Streamlit.
+    
+    Evita colisiones de claves en botones, inputs y checkboxes usando
+    hash MD5 del seed. Garantiza que la misma combinación prefix+seed
+    siempre produce la misma clave.
+    
+    Args:
+        prefix: Prefijo descriptivo (ej: "unlock", "resetpwd")
+        seed: Semilla única (generalmente DN del objeto AD)
+    
+    Returns:
+        String con formato "prefix_xxxxx" (primeros 10 chars del hash)
+        
+    Ejemplo:
+        key = stable_key("unlock", "CN=User,DC=Teva,DC=Corp")
+        st.button("Desbloquear", key=key)
+    """
     seed = seed or ""
     h = hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
     return f"{prefix}_{h}"
 
 
 def ad_largeint_to_int(val) -> int:
+    """
+    Convierte valores Integer8 de AD a int de Python.
+    
+    AD almacena enteros grandes (lastLogonTimestamp, pwdLastSet, lockoutTime)
+    como Integer8 (LargeInteger) con estructura HighPart/LowPart.
+    
+    Args:
+        val: Valor Integer8, string, int, o None
+    
+    Returns:
+        Integer de 64 bits, o 0 si error/None
+        
+    Soporta:
+        - None -> 0
+        - int nativo -> retorna igual
+        - string numérico -> parsea a int
+        - Objetos COM con HighPart/LowPart -> reconstruye el int
+    """
     if val is None:
         return 0
 
@@ -95,6 +203,22 @@ def ad_largeint_to_int(val) -> int:
 
 
 def filetime_to_dt_str(filetime) -> str:
+    """
+    Convierte FILETIME (AD) a string datetime legible.
+    
+    FILETIME es un contador de 100-nanosegundos desde 1601-01-01 UTC.
+    Convierte a timezone local AR (UTC-3).
+    
+    Args:
+        filetime: Valor Integer8 de AD (lastLogonTimestamp, pwdLastSet, etc)
+    
+    Returns:
+        String "DD/MM/YYYY HH:MM" o "—" si no aplica/error
+        
+    Notas:
+        - lastLogonTimestamp ≈ 0 significa "nunca logueó"
+        - pwdLastSet ≈ 0 significa "nunca cambió password"
+    """
     try:
         ft = ad_largeint_to_int(filetime)
         if ft <= 0:
@@ -109,6 +233,17 @@ def filetime_to_dt_str(filetime) -> str:
 
 
 def dt_to_filetime(dt_obj: datetime) -> int:
+    """
+    Convierte datetime de Python a FILETIME (Integer8 de AD).
+    
+    Inverso de filetime_to_dt_str. Usado al escribir en AD.
+    
+    Args:
+        dt_obj: datetime (puede tener tzinfo o no; asume UTC si ingenuist)
+    
+    Returns:
+        Integer FILETIME de 64 bits
+    """
     if dt_obj.tzinfo is None:
         dt_obj = dt_obj.replace(tzinfo=timezone.utc)
     epoch_as_filetime = 11644473600
@@ -116,6 +251,20 @@ def dt_to_filetime(dt_obj: datetime) -> int:
 
 
 def is_locked(lockout_time, user_account_control=None) -> bool:
+    """
+    Determina si un usuario está bloqueado en AD.
+    
+    Un usuario está bloqueado si:
+    1. lockoutTime > 0 (cuenta bloqueada por intentos fallidos), O
+    2. userAccountControl tiene el bit 0x10 activado (ACCOUNTDISABLE)
+    
+    Args:
+        lockout_time: Valor Integer8 de lockoutTime
+        user_account_control: Valor de userAccountControl (opcional)
+    
+    Returns:
+        True si está bloqueado, False en caso contrario
+    """
     if ad_largeint_to_int(lockout_time) > 0:
         return True
     try:
@@ -127,6 +276,18 @@ def is_locked(lockout_time, user_account_control=None) -> bool:
 
 
 def is_enabled(user_account_control) -> str:
+    """
+    Determina si un usuario/equipo está habilitado en AD.
+    
+    Args:
+        user_account_control: Valor de userAccountControl
+    
+    Returns:
+        "Sí" si habilitado, "No" si deshabilitado, "—" si error
+        
+    Nota:
+        El bit 0x2 (ACCOUNTDISABLE) indica si la cuenta está deshabilitada.
+    """
     try:
         uac = int(user_account_control)
         disabled = bool(uac & 2)
@@ -136,6 +297,19 @@ def is_enabled(user_account_control) -> str:
 
 
 def extract_ou(dn: str) -> str:
+    """
+    Extrae la jerarquía de OUs desde un DN y la formatea de forma legible.
+    
+    Ejemplo:
+        DN: "CN=User,OU=Users,OU=AR,OU=Clients,OU=Global,DC=Teva,DC=Corp"
+        Retorna: "Global / Clients / AR / Users"
+    
+    Args:
+        dn: Distinguished Name completo
+    
+    Returns:
+        String con OUs separadas por " / " o "—" si error
+    """
     try:
         parts = [p[3:] for p in dn.split(",") if p.startswith("OU=")]
         parts = list(reversed(parts))
@@ -145,6 +319,19 @@ def extract_ou(dn: str) -> str:
 
 
 def format_group_dn_to_cn(dn: str) -> str:
+    """
+    Extrae el CN (Common Name) desde un DN de grupo.
+    
+    Ejemplo:
+        DN: "CN=Domain Admins,CN=Builtin,DC=Teva,DC=Corp"
+        Retorna: "Domain Admins"
+    
+    Args:
+        dn: Distinguished Name
+    
+    Returns:
+        CN (primer componente) o dn original si error
+    """
     try:
         return dn.split(",")[0][3:]
     except Exception:
@@ -152,6 +339,20 @@ def format_group_dn_to_cn(dn: str) -> str:
 
 
 def normalize_ad_text(val) -> str:
+    """
+    Normaliza y limpia valores traídos de AD.
+    
+    - Convierte None → "—"
+    - Maneja listas/tuplas → " | " separados
+    - Elimina caracteres invisibles (RTL/LTR markers)
+    - Retorna "—" si string vacío
+    
+    Args:
+        val: Valor de AD (puede ser None, str, list, etc)
+    
+    Returns:
+        String normalizado y seguro para mostrar en UI
+    """
     if val is None:
         return "—"
 
@@ -169,6 +370,17 @@ def normalize_ad_text(val) -> str:
 
 
 def dn_is_in_default_ou(dn: str) -> bool:
+    """
+    Verifica si un DN pertenece a la OU 'Default'.
+    
+    Used to identify newly created computers that haven't been moved yet.
+    
+    Args:
+        dn: Distinguished Name
+    
+    Returns:
+        True si el DN termina con DEFAULT_COMPUTERS_OU_DN
+    """
     if not dn:
         return False
     dn_norm = dn.strip().lower()
@@ -176,6 +388,17 @@ def dn_is_in_default_ou(dn: str) -> bool:
 
 
 def dn_is_under_scope_ou(dn: str) -> bool:
+    """
+    Verifica si un DN pertenece al scope de reportes (OU=MRO).
+    
+    Usado para filtrar reportes de inactividad al scope correcto.
+    
+    Args:
+        dn: Distinguished Name
+    
+    Returns:
+        True si el DN termina con SCOPE_OU_DN
+    """
     if not dn:
         return False
     dn_norm = dn.strip().lower()
@@ -183,9 +406,33 @@ def dn_is_under_scope_ou(dn: str) -> bool:
 
 
 # =====================================================
-# Acciones AD
+# Operaciones de escribtura en AD (Acciones privilegiadas)
 # =====================================================
+"""
+Funciones que modifican estado en Active Directory.
+Requieren permisos de dominio y contexto COM inicializado.
+Usan patrón: intenta pyad → fallback ADSI si es necesario.
+"""
+
 def unlock_user_by_dn(user_dn: str) -> None:
+    """
+    Desbloquea un usuario en AD poniendo lockoutTime = 0.
+    
+    Realiza dos intentos:
+    1. Usa pyad.ADObject (preferred, más limpio)
+    2. Fallback a win32com.client ADSI si pyad falla
+    
+    Args:
+        user_dn: Distinguished Name del usuario (ej: "CN=John,OU=Users,DC=Teva,DC=Corp")
+    
+    Raises:
+        ValueError: Si el DN está vacío
+        RuntimeError: Si ambos intentos (pyad y ADSI) fallan
+    
+    Nota:
+        Automatiza manualmente el cambio de lockoutTime porque algunos
+        comandos AD CLI no están siempre disponibles.
+    """
     if not user_dn:
         raise ValueError("DN vacío: no se puede desbloquear.")
 
@@ -222,6 +469,24 @@ def unlock_user_by_dn(user_dn: str) -> None:
 
 
 def reset_password_by_dn(user_dn: str, new_password: str) -> None:
+    """
+    Reseta la contraseña de un usuario en AD.
+    
+    Ejecuta:
+    1. SetPassword() para cambiar la contraseña
+    2. Put(pwdLastSet, -1) para NO forzar cambio al próximo logon
+    
+    Args:
+        user_dn: Distinguished Name del usuario
+        new_password: Nueva contraseña (min 6 caracteres, se recomienda >10)
+    
+    Raises:
+        ValueError: Si el DN está vacío o password muy corta
+    
+    Nota:
+        Requiere SSL/TLS para ejecutarse (ADSI sobre LDAP requiere encriptación
+        para SetPassword). Típicamente funciona en red corporativa Teva.
+    """
     if not user_dn:
         raise ValueError("DN vacío: no se puede resetear password.")
     if not new_password or len(new_password.strip()) < 6:
@@ -232,6 +497,7 @@ def reset_password_by_dn(user_dn: str, new_password: str) -> None:
         user = win32com.client.GetObject(f"LDAP://{user_dn}")
         user.SetPassword(new_password)
 
+        # Garantiza "no forzar cambio al próximo logon"
         try:
             user.Put("pwdLastSet", -1)
         except Exception:
@@ -242,6 +508,24 @@ def reset_password_by_dn(user_dn: str, new_password: str) -> None:
 
 
 def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
+    """
+    Mueve un objeto equipo a una OU diferente en AD.
+    
+    Usa MoveHere() de ADSI para mover el equipo entre OUs.
+    Típicamente usado para mover workstations de OU=Default a OU=WKS.
+    
+    Args:
+        computer_dn: DN del equipo a mover
+        target_ou_dn: DN de la OU destino
+    
+    Raises:
+        ValueError: Si alguno de los DNs está vacío
+    
+    Ejemplo:
+        from_dn = "CN=PC001,OU=Default,OU=Global,DC=Teva,DC=Corp"
+        to_dn = "OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global,DC=Teva,DC=Corp"
+        move_computer_to_target_ou(from_dn, to_dn)
+    """
     if not computer_dn:
         raise ValueError("DN vacío: no se puede mover equipo.")
     if not target_ou_dn:
@@ -255,9 +539,53 @@ def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
 
 
 # =====================================================
-# Consulta de usuarios
+# Consulta de Usuarios
 # =====================================================
+"""
+Funciones para buscar y traer datos de usuarios desde AD.
+Retornan diccionarios con atributos o {"error": msg} en caso de fallo.
+"""
+
 def get_user_data(identifier: str):
+    """
+    Busca un usuario por identifier y retorna sus atributos principales.
+    
+    Busca por:
+    - sAMAccountName (nombre corto del usuario, ej: jsmith)
+    - mail (dirección de correo)
+    - userPrincipalName (UPN, ej: jsmith@Teva.Corp)
+    
+    Args:
+        identifier: Usuario, mail o UPN a buscar
+    
+    Returns:
+        Dict con atributos del usuario incluyendo campos internos (_*):
+        {
+            "_dn": Distinguished Name (para acciones privilegiadas),
+            "_bloqueado_bool": bool (True si bloqueado),
+            "_uac": userAccountControl raw,
+            "_lockoutTime_raw": valor original de lockoutTime,
+            "_lockoutTime_int": lockoutTime convertido a int,
+            "Usuario": sAMAccountName,
+            "Nombre": name,
+            "Mail": mail,
+            "UPN": userPrincipalName,
+            "Descripción": description,
+            "OU": OU formateada,
+            "Creado": fecha formateada,
+            "Modificado": fecha formateada,
+            "Habilitado": "Sí" o "No",
+            "Bloqueado": "Sí" o "No",
+            "Pwd last set": fecha último cambio de password,
+            "Último logon (aprox.)": fecha último acceso (aproximado)
+        }
+        
+        O {"error": mensaje} si no se encuentra o hay excepción
+    
+    Nota:
+        Retorna solo el PRIMER resultado (first match).
+        lastLogonTimestamp es aproximado (se replica entre DCs).
+    """
     try:
         q = pyad.adquery.ADQuery()
 
@@ -320,9 +648,31 @@ def get_user_data(identifier: str):
 
 
 # =====================================================
-# Grupos (lazy-load) -> ADQuery memberOf
+# Pertenencia a Grupos (lazy-load)
 # =====================================================
+"""
+Funciones para traer grupos de un usuario (lazy-loaded en la UI para no ralentizar).
+"""
+
 def get_groups_from_dn(user_dn: str):
+    """
+    Obtiene lista de grupos a los que pertenece un usuario.
+    
+    Busca el atributo memberOf del usuario (grupos directos).
+    Ordena alfabéticamente.
+    
+    Args:
+        user_dn: Distinguished Name del usuario
+    
+    Returns:
+        List[str] de CNs de grupo (ej: ["Domain Users", "Accounting Group"])
+        O lista con mensaje de error si falla
+        O lista vacía si no se pueden leer grupos
+    
+    Nota:
+        No incluye membresía transitiva (grupos de grupos).
+        memberOf contiene DNs completos; extrae solo el CN.
+    """
     if not user_dn:
         return []
 
@@ -358,9 +708,41 @@ def get_groups_from_dn(user_dn: str):
 
 
 # =====================================================
-# Consulta de equipos
+# Consulta de Equipos
 # =====================================================
+"""
+Funciones para buscar y traer datos de equipos (computadoras) desde AD.
+"""
+
 def get_computer_data(samname: str):
+    """
+    Busca un equipo por SAMAccountName y retorna sus atributos principales.
+    
+    Args:
+        samname: Nombre del equipo (puede tener $ al final o sin ella)
+    
+    Returns:
+        Dict con atributos del equipo incluyendo:
+        {
+            "_dn": Distinguished Name,
+            "_in_default_ou": bool (True si está en OU Default, necesita mover),
+            "Equipo": sAMAccountName,
+            "DNS Hostname": dNSHostName,
+            "Sistema": operatingSystem,
+            "Descripción": description,
+            "OU": OU formateada,
+            "Creado": fecha creación,
+            "Modificado": fecha última modificación,
+            "Último logon (aprox.)": fecha último acceso
+        }
+        
+        O None si no existe
+        O {"error": mensaje} si hay excepción
+    
+    Nota:
+        Automáticamente agrega $ al final del SAMAccountName si no lo tiene
+        (convención AD para objetos computadora).
+    """
     try:
         if not samname:
             return None
@@ -412,9 +794,38 @@ def get_computer_data(samname: str):
 
 
 # =====================================================
-# Reportes (inactivos)
+# Reportes (Usuarios/Equipos inactivos)
 # =====================================================
+"""
+Genera reportes de inactividad basados en lastLogonTimestamp.
+Útiles para higiene de directorio (desactivar/eliminar objetos inactivos).
+"""
+
 def fetch_inactives(kind: str, days: int):
+    """
+    Genera reporte de usuarios o equipos inactivos en el scope MRO.
+    
+    Criterio de inactividad:
+    - lastLogonTimestamp ≈ 0 (nunca se conectó), O
+    - lastLogonTimestamp anterior a cutoff_date (hace N días)
+    
+    Args:
+        kind: "Usuarios" o "Equipos"
+        days: Días de inactividad mínima (ej: 30, 60, 90)
+    
+    Returns:
+        List[Dict] con usuarios/equipos inactivos. Campos:
+        - Para usuarios: Usuario, Nombre, Mail, UPN, Habilitado, OU, Pwd last set, etc
+        - Para equipos: Equipo, DNS Hostname, Sistema, Descripción, OU, etc
+        
+        O lista vacía si no hay resultados
+    
+    Notas:
+        - Busca en SCOPE_OU_DN (OU=MRO...)
+        - Filtra usuarios con SAMAccountName terminando en $ (no son usuarios)
+        - lastLogonTimestamp es aproximado, replicado entre DCs
+        - Util para campañas de higiene cada 30/60/90 días
+    """
     with com_context():
         q = pyad.adquery.ADQuery()
 
@@ -497,6 +908,7 @@ def fetch_inactives(kind: str, days: int):
 # =====================================================
 _INTERNAL_KEYS = {"_dn", "_bloqueado_bool", "_uac", "_lockoutTime_raw", "_lockoutTime_int"}
 
+
 def build_user_export_txt(user_data: dict, groups: list[str]) -> bytes:
     lines = []
     lines.append("Consulta AD - Export (usuario + grupos)")
@@ -527,12 +939,10 @@ def build_user_export_csv(user_data: dict, groups: list[str]) -> bytes:
 
 
 def reset_user_caches_for_dn(dn: str):
-    # grupos
     st.session_state["groups_dn"] = dn
     st.session_state.pop("groups_list", None)
     st.session_state.pop("groups_error", None)
 
-    # export
     st.session_state.pop("export_txt_bytes", None)
     st.session_state.pop("export_csv_bytes", None)
     st.session_state.pop("export_stamp", None)
@@ -540,10 +950,6 @@ def reset_user_caches_for_dn(dn: str):
 
 
 def ensure_export_ready(dn: str, user_data: dict):
-    """
-    Genera y cachea bytes TXT/CSV usando grupos ya cargados.
-    Evita re-generar en cada rerun.
-    """
     if not dn:
         return
 
@@ -563,9 +969,56 @@ def ensure_export_ready(dn: str, user_data: dict):
 
 
 # =====================================================
-# Cards (HTML)
+# Password helpers
 # =====================================================
+def generate_temp_password(length: int = 14) -> str:
+    # letras + números + símbolos “seguros”
+    alphabet = string.ascii_letters + string.digits + "!@#$%*_-+=?"
+    # fuerza mínima: 1 de cada categoría
+    while True:
+        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
+        has_lower = any(c.islower() for c in pwd)
+        has_upper = any(c.isupper() for c in pwd)
+        has_digit = any(c.isdigit() for c in pwd)
+        has_sym = any(c in "!@#$%*_-+=?" for c in pwd)
+        if has_lower and has_upper and has_digit and has_sym:
+            return pwd
+
+
+def looks_weak_password(pwd: str) -> bool:
+    if not pwd:
+        return True
+    if len(pwd) < 10:
+        return True
+    cats = 0
+    cats += 1 if any(c.islower() for c in pwd) else 0
+    cats += 1 if any(c.isupper() for c in pwd) else 0
+    cats += 1 if any(c.isdigit() for c in pwd) else 0
+    cats += 1 if any(not c.isalnum() for c in pwd) else 0
+    return cats < 3
+
+
+# =====================================================
+# Componentes UI (Cards y Acciones)
+# =====================================================
+"""
+Funciones de renderizado HTML/Streamlit para mostrar datos y acciones.
+Incluye cards, botones de unlock, reset de password, y movimiento de OUs.
+"""
+
 def render_card(k, v):
+    """
+    Renderiza una tarjeta HTML para mostrar un atributo AD.
+    
+    Aplica estilos especiales para "Habilitado":
+    - "Sí" → ícono verde (🟢)
+    - "No" → ícono rojo (🔴)
+    - Otro → ícono gris (⚪)
+    
+    Args:
+        k: Clave/etiqueta (ej: "Usuario", "Habilitado")
+        v: Valor a mostrar (se escapa HTML automáticamente)
+    """
     icon = ""
     color = None
 
@@ -602,6 +1055,19 @@ def render_card(k, v):
 
 
 def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
+    """
+    Renderiza la fila de estado "Bloqueado" con botón de desbloqueo.
+    
+    Muestra:
+    - Tarjeta con estado (🔴 Sí / 🟢 No)
+    - Botón "Desbloquear" si bloqueado_bool es True
+    - Espacio vacío si no está bloqueado (mantiene alineación)
+    
+    Args:
+        bloqueado_bool: True si el usuario está bloqueado
+        dn: Distinguished Name del usuario (para acciones)
+        criterio: Criterio original de búsqueda (para st.rerun)
+    """
     if bloqueado_bool:
         pill = "<span style='color:#ff4c4c; font-weight:bold;'>🔴 Sí</span>"
     else:
@@ -629,13 +1095,12 @@ def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
 
     with col_right:
         if bloqueado_bool:
-            # Botón más claro y directo
             st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
             if st.button("🔓 Desbloquear", key=stable_key("unlock", dn), use_container_width=True, type="primary"):
                 try:
                     unlock_user_by_dn(dn)
 
-                    # Actualizamos el UI localmente (sin obligar a re-consultar AD)
+                    # UI consistente (sin reconsultar)
                     if "data" in st.session_state and isinstance(st.session_state["data"], dict):
                         st.session_state["data"]["_bloqueado_bool"] = False
                         st.session_state["data"]["Bloqueado"] = "No"
@@ -650,58 +1115,110 @@ def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str):
             st.markdown("<div style='height: 52px;'></div>", unsafe_allow_html=True)
 
 
-def render_reset_password_card(dn: str, criterio: str):
-    st.markdown(
-        f"""
-        <div style='
-            background: #262626;
-            padding: 18px 22px;
-            border-radius: 14px;
-            margin-bottom: 12px;
-            border: 1px solid rgba(255,255,255,0.05);
-            box-shadow: 0 2px 4px rgba(0,0,0,0.25);
-        '>
-            <b style="font-size:15px; opacity:0.9;">Resetear contraseña</b><br>
-            <div style="font-size:13px; margin-top:6px; opacity:0.85;">
-                Se setea una nueva contraseña. No se fuerza cambio en el próximo logon.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def render_reset_password_section(dn: str):
+    """
+    Renderiza sección expandible para resetear contraseña de usuario.
+    
+    Incluye:
+    - Botón para generar contraseña temporal aleatoria
+    - Campos para ingresar contraseña manualmente
+    - Checkbox para mostrar/ocultar contraseña
+    - Validación de fortaleza
+    - Checkbox de confirmación obligatorio
+    - Limpieza automática de campos tras éxito
+    
+    Args:
+        dn: Distinguished Name del usuario
+    """
+    with st.expander("🔒 Resetear contraseña", expanded=False):
+        st.warning(
+            "Esto cambia la contraseña del usuario en Active Directory. "
+            "Se intenta NO forzar cambio al próximo logon (pwdLastSet = -1).",
+            icon="⚠️",
+        )
 
-    p1_key = stable_key("pwd1", dn)
-    p2_key = stable_key("pwd2", dn)
+        p1_key = stable_key("pwd1", dn)
+        p2_key = stable_key("pwd2", dn)
+        show_key = stable_key("pwd_show", dn)
+        confirm_key = stable_key("pwd_confirm", dn)
+        allow_weak_key = stable_key("pwd_allowweak", dn)
 
-    p1 = st.text_input("Nueva contraseña", type="password", key=p1_key)
-    p2 = st.text_input("Confirmar contraseña", type="password", key=p2_key)
+        # Controles arriba
+        c0, c1, c2 = st.columns([1.3, 1.2, 1.5])
+        with c0:
+            if st.button("🎲 Generar temporal", key=stable_key("pwd_gen", dn), use_container_width=True):
+                pwd = generate_temp_password(14)
+                st.session_state[p1_key] = pwd
+                st.session_state[p2_key] = pwd
+                st.session_state[confirm_key] = False
+                st.rerun()
 
-    colA, colB = st.columns(2)
-    with colA:
-        do_reset = st.button("🔑 Resetear", key=stable_key("resetpwd", dn), use_container_width=True)
-    with colB:
-        st.caption("Tip: usá una temporal fuerte.")
+        with c1:
+            show = st.checkbox("Mostrar", key=show_key, value=False)
 
-    if do_reset:
-        try:
-            if not p1 or not p2:
-                st.warning("Completá ambos campos de contraseña.")
-                return
-            if p1 != p2:
-                st.error("Las contraseñas no coinciden.")
-                return
+        with c2:
+            st.caption("Sugerencia: usá la temporal generada y luego cambiala si hace falta.")
 
-            reset_password_by_dn(dn, p1)
+        ptype = "default" if show else "password"
 
-            st.session_state[p1_key] = ""
-            st.session_state[p2_key] = ""
+        p1 = st.text_input("Nueva contraseña", type=ptype, key=p1_key)
+        p2 = st.text_input("Confirmar contraseña", type=ptype, key=p2_key)
 
-            st.success("Contraseña reseteada correctamente.")
-        except Exception as e:
-            st.error(f"No se pudo resetear: {type(e).__name__}: {e}")
+        weak = looks_weak_password(p1) if p1 else False
+        if p1 and weak:
+            st.info("La contraseña parece débil (ideal: 10+ caracteres y 3+ tipos: mayúsc/minúsc/número/símbolo).")
+
+        allow_weak = st.checkbox("Permitir contraseña débil (no recomendado)", key=allow_weak_key, value=False)
+
+        st.divider()
+
+        confirm = st.checkbox("Confirmo que quiero resetear la contraseña de este usuario", key=confirm_key, value=False)
+
+        do_reset = st.button(
+            "🔑 Ejecutar reset",
+            key=stable_key("resetpwd", dn),
+            use_container_width=True,
+            type="primary",
+            disabled=not confirm,
+        )
+
+        if do_reset:
+            try:
+                if not p1 or not p2:
+                    st.warning("Completá ambos campos de contraseña.")
+                    return
+                if p1 != p2:
+                    st.error("Las contraseñas no coinciden.")
+                    return
+                if looks_weak_password(p1) and not allow_weak:
+                    st.error("Contraseña débil. Marcá 'Permitir contraseña débil' o usá 'Generar temporal'.")
+                    return
+
+                reset_password_by_dn(dn, p1)
+
+                # limpiar campos + confirmaciones
+                st.session_state[p1_key] = ""
+                st.session_state[p2_key] = ""
+                st.session_state[confirm_key] = False
+                st.session_state[allow_weak_key] = False
+
+                st.success("Contraseña reseteada correctamente.")
+            except Exception as e:
+                st.error(f"No se pudo resetear: {type(e).__name__}: {e}")
 
 
 def render_move_computer_card(in_default: bool, dn: str, criterio: str):
+    """
+    Renderiza tarjeta con opción de mover equipo fuera de la OU Default.
+    
+    Solo se muestra si in_default=True.
+    Botón mueve equipo a OU=WKS,OU=MRO,OU=AR,OU=Clients,OU=Global.
+    
+    Args:
+        in_default: True si equipo está en OU Default
+        dn: Distinguished Name del equipo
+        criterio: Criterio de búsqueda original (no usado actualmente)
+    """
     if not in_default:
         return
 
@@ -735,7 +1252,21 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str):
 # =====================================================
 # Búsqueda
 # =====================================================
+"""
+Función principal que ejecuta búsqueda en AD y guarda resultados en session_state.
+"""
+
 def run_search(modo: str, criterio: str):
+    """
+    Ejecuta búsqueda en AD (Usuario o Equipo).
+    
+    Valida criterio, ejecuta get_user_data o get_computer_data,
+    y almacena resultados en st.session_state["data"].
+    
+    Args:
+        modo: "Usuario" o "Equipo"
+        criterio: Término de búsqueda
+    """
     criterio = (criterio or "").strip()
     if not criterio:
         st.warning("Ingresá un valor para buscar.")
@@ -756,6 +1287,19 @@ def run_search(modo: str, criterio: str):
 # =====================================================
 # Streamlit UI
 # =====================================================
+# =====================================================
+# Interfaz Streamlit - Configuración y Sidebar
+# =====================================================
+"""
+Aplicación web Streamlit para consultar Active Directory.
+
+Flujo:
+1. Usuario elige modo (Usuario/Equipo/Reportes) en sidebar
+2. Si Usuario/Equipo: ingresa criterio y presiona "Buscar"
+3. Si Reportes: elige tipo y días, presiona "Generar reporte"
+4. Resultados se muestran en el área principal con opciones de acción
+"""
+
 st.set_page_config(page_title="Consulta AD", page_icon="🖥️", layout="wide")
 
 with st.sidebar:
@@ -792,8 +1336,12 @@ if "limpiar" in locals() and limpiar:
 
 
 # =====================================================
-# Usuario / Equipo
+# Área Principal: Usuario / Equipo (búsqueda)
 # =====================================================
+"""
+Lógica para mostrar resultados de búsqueda de usuario o equipo.
+"""
+
 if modo in ("Usuario", "Equipo"):
     if "buscar" in locals() and buscar:
         run_search(modo, criterio)
@@ -835,7 +1383,6 @@ if modo in ("Usuario", "Equipo"):
         dn = data.get("_dn", "")
         bloqueado_bool = bool(data.get("_bloqueado_bool", False))
 
-        # si cambia el usuario, limpiamos caches (grupos/export)
         if dn and st.session_state.get("groups_dn") != dn:
             reset_user_caches_for_dn(dn)
 
@@ -866,14 +1413,14 @@ if modo in ("Usuario", "Equipo"):
 
         st.markdown("---")
 
-        # Acciones (password dentro de expander)
-        with st.expander("🔑 Acciones", expanded=False):
+        # Acciones: ahora el reset está bien protegido y no molesta
+        with st.expander("🧰 Acciones", expanded=False):
             if dn:
-                render_reset_password_card(dn, last_criterio)
+                render_reset_password_section(dn)
             else:
                 st.info("No hay DN para ejecutar acciones.")
 
-        # Grupos + Export (en el MISMO expander)
+        # Grupos + Export (mismo expander)
         with st.expander("📁 Ver grupos del usuario", expanded=False):
             if not dn:
                 st.write("No hay DN para este usuario.")
@@ -895,7 +1442,6 @@ if modo in ("Usuario", "Equipo"):
                         st.session_state["groups_list"] = g or []
                         st.session_state["groups_error"] = None
 
-                    # Al cargar grupos, preparamos export automáticamente
                     ensure_export_ready(dn, data)
                     st.rerun()
 
@@ -921,7 +1467,6 @@ if modo in ("Usuario", "Equipo"):
             with colR2:
                 st.caption("Refresca la lista desde AD.")
 
-            # Lista de grupos (píldoras)
             if len(grupos) == 0:
                 st.write("El usuario no pertenece a ningún grupo.")
             else:
@@ -948,7 +1493,6 @@ if modo in ("Usuario", "Equipo"):
                     else:
                         gcol3.markdown(pill, unsafe_allow_html=True)
 
-            # Export: aparece automáticamente porque ya hay grupos cargados
             ensure_export_ready(dn, data)
             st.markdown("### ⬇️ Exportar usuario + grupos")
 
@@ -1004,7 +1548,12 @@ if modo in ("Usuario", "Equipo"):
                 render_card(k, v)
 
 else:
-    # Reportes
+    # =====================================================
+    # Área Principal: Reportes (inactividad)
+    # =====================================================
+    """
+    Lógica para generar y mostrar reportes de inactividad.
+    """
     if "ejecutar_rep" in locals() and ejecutar_rep:
         with st.spinner("Generando reporte…"):
             rep = fetch_inactives(tipo_rep, int(dias))
