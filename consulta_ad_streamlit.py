@@ -1555,7 +1555,9 @@ def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str) -> None:
             st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
             if st.button("🔓 Desbloquear", key=stable_key("unlock", dn), use_container_width=True, type="primary"):
                 try:
-                    unlock_user_by_dn(dn)
+                    # Fase 6: UI spinners para operaciones largas
+                    with st.spinner("🔄 Desbloqueando usuario..."):
+                        unlock_user_by_dn(dn)
 
                     # UI consistente (sin reconsultar)
                     if "data" in st.session_state and isinstance(st.session_state["data"], dict):
@@ -1651,7 +1653,9 @@ def render_reset_password_section(dn: str) -> None:
                     st.error("Contraseña débil. Marcá 'Permitir contraseña débil' o usá 'Generar temporal'.")
                     return
 
-                reset_password_by_dn(dn, p1)
+                # Fase 6: UI spinners para operaciones largas
+                with st.spinner("🔄 Reseteando contraseña..."):
+                    reset_password_by_dn(dn, p1)
 
                 # limpiar campos + confirmaciones
                 st.session_state[p1_key] = ""
@@ -1700,7 +1704,9 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str) -> None:
 
     if st.button("📁 Mover a Global / Clients / AR / MRO / WKS", key=stable_key("movepc", dn), use_container_width=True):
         try:
-            move_computer_to_target_ou(dn, TARGET_WKS_OU_DN)
+            # Fase 6: UI spinners para operaciones largas
+            with st.spinner("📦 Moviendo equipo a OU objetivo..."):
+                move_computer_to_target_ou(dn, TARGET_WKS_OU_DN)
             st.success("Equipo movido al OU objetivo.")
         except Exception as e:
             st.error(f"No se pudo mover: {type(e).__name__}: {e}")
