@@ -1,168 +1,231 @@
-# 🔄 Refactor Full - En Progreso
+# 🔄 Refactor Full - Progreso
+
+## Estado General: 50% Completado
+
+Commits realizados:
+1. ✅ `31f35db` - Fase 1: Config management, logging y validación
+2. ✅ `10f4381` - Fase 2: Type hints completados (100%)
+
+---
 
 ## Estado Actual
 
-### ✅ Completado - Fase 1
+### ✅ Completado - Fase 1 & 2
 
-1. **Config Management**
-   - ✅ `config.yaml` creado con toda la configuración centralizada
-   - ✅ Funciones `load_config()` y `get_config()` implementadas
-   - ✅ Constants (DOMAIN_DN, OUs) ahora cargan de config.yaml
+1. **Config Management** ✅
+   - `config.yaml` con configuración centralizada
+   - `load_config()` con caching
+   - `get_config()` con fallbacks
+   - Constants cargan de config
 
-2. **Logging**
-   - ✅ Logger configurado con `logging.getLogger(__name__)`
-   - ✅ Nivel de log INFO por defecto
-   - ✅ Primeras líneas de log en load_config()
+2. **Type Hints** ✅ (100% completado)
+   - Todos los parámetros con anotaciones
+   - Todos los return types completados
+   - Imports `typing` en lugar
 
-3. **Validación**
-   - ✅ `validate_dn()` - valida DNs y scope
-   - ✅ `validate_search_criteria()` - valida criterios de búsqueda
-   - ✅ `validate_password()` - valida fortaleza de contraseña
+3. **Validación** ✅
+   - `validate_dn()` - valida DNs y scope
+   - `validate_search_criteria()` - valida criterios
+   - `validate_password()` - valida fortaleza
 
-4. **Type Hints (Parcial)**
-   - ✅ Imports añadidos: `from typing import Optional, Dict, List, Any`
-   - ✅ Type hints en funciones auxiliares más pequeñas
-   - Pending: Completar en funciones grandes
+4. **Logging** ✅ (Infraestructura)
+   - Logger configurado
+   - Imports completos
+   - Primer uso en get_user_data()
 
-5. **Requirements**
-   - ✅ `PyYAML` agregado a requirements.txt
-   - ✅ Paquetes verificados y actualizados
-
----
-
-### ⏳ En Progreso - Fase 2
-
-1. **Type Hints (Falta completar)**
-   - [ ] `get_user_data(criteria: str) -> Optional[Dict[str, Any]]`
-   - [ ] `get_computer_data(samname: str) -> Optional[Dict[str, Any]]`
-   - [ ] `get_groups_from_dn(user_dn: str) -> List[str]`
-   - [ ] `unlock_user_by_dn(user_dn: str) -> None`
-   - [ ] `reset_password_by_dn(user_dn: str, new_password: str) -> None`
-   - [ ] `move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None`
-   - [ ] `fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]`
-   - [ ] Todas las funciones de rendering (`render_card`, `render_bloqueado_row`, etc)
-   - [ ] Funciones de export y cache
-
-2. **Logging Granular**
-   - [ ] Agregar `logger.info()` en operaciones principales
-   - [ ] Agregar `logger.error()` con exc_info=True en excepciones
-   - [ ] Agregar `logger.debug()` para tracing
-   - [ ] Medir performance con logs
-
-3. **Error Handling Granular**
-   - [ ] Diferenciar `adobject.ADObjectNotFound` vs errores genéricos
-   - [ ] Manejo específico de timeout LDAP
-   - [ ] Manejo específico de errores de permiso
-   - [ ] Manejo específico de errores COM
-
-4. **Cache con TTL**
-   - [ ] Implementar sistema de cache con timestamp
-   - [ ] Agregar funciones `get_from_cache()` y `set_in_cache()`
-   - [ ] Aplicar a user_data, computer_data, groups
-   - [ ] TTL configurable desde config.yaml
-
-5. **UI Spinners**
-   - [ ] Agregar `st.spinner()` en operaciones >2 segundos
-   - [ ] Spinner en `get_user_data()` ✅ (ya existe)
-   - [ ] Agregar en `get_groups_from_dn()`
-   - [ ] Agregar en `fetch_inactives()`
+5. **Requirements** ✅
+   - PyYAML agregado
 
 ---
 
-### 📋 Pendiente - Fase 3
+### ⏳ En Progreso - Fase 3 (Logging Granular)
 
-1. **Tests Expandidos**
-   - [ ] Tests para `validate_dn()` con casos válidos/inválidos
-   - [ ] Tests para `validate_search_criteria()`
-   - [ ] Tests para `validate_password()`
-   - [ ] Tests para edge cases de conversión de FILETIME
-   - [ ] Tests para manejo de errores AD
-   - [ ] Tests para session state corruption
+**Objetivo:** Agregar logs en operaciones críticas + error handling
 
-2. **Documentación Actualizada**
-   - [ ] Actualizar DOCUMENTACION.md con nuevo config.yaml
-   - [ ] Agregar sección de logging en ARQUITECTURA.md
-   - [ ] Agregar sección de validación en REFERENCIAS_RAPIDA.md
-
----
-
-## Cambios Realizados
-
-### config.yaml
-```yaml
-- Active Directory: domain_dn, OUs, configurables
-- Security: passwords, validation, thresholds
-- Logging: level, file output, sanitization
-- Cache: TTLs
-- UI: settings
-- Timeouts: por operación
+```python
+# Patrón a usar:
+logger.info("Operación iniciada")
+logger.debug("Detalles técnicos")
+logger.error("Algo falló", exc_info=True)
 ```
 
-### consulta_ad_streamlit.py
-```python
-# Nuevos imports
-from typing import Optional, Dict, List, Any
-from functools import lru_cache
-import logging
-import yaml
+**Funciones por completar:**
+- [ ] `get_user_data()` - agregar más logs
+- [ ] `get_computer_data()` - logs de búsqueda
+- [ ] `get_groups_from_dn()` - logs de carga
+- [ ] `unlock_user_by_dn()` - logs de acción
+- [ ] `reset_password_by_dn()` - logs de acción
+- [ ] `move_computer_to_target_ou()` - logs de acción
+- [ ] `fetch_inactives()` - logs de reporte
 
-# Nuevas funciones
+---
+
+### 📋 Pendiente - Fases 4-6
+
+4. **Error Handling Granular** (Fase 4)
+   - Diferenciar tipos de exception AD
+   - Manejo específico por tipo
+   - Mensajes de error más precisos
+
+5. **Cache con TTL** (Fase 5)
+   - Sistema de cache con timestamps
+   - TTL configurable
+   - Aplicar a queries
+
+6. **UI Spinners + Tests** (Fase 6)
+   - Spinners en operaciones largas
+   - Tests expandidos
+   - Documentación actualizada
+
+---
+
+## Cambios Realizados por Fase
+
+### Fase 1: Infrastructure
+```yaml
+config.yaml
+- active_directory: {domain_dn, OUs}
+- security: {passwords, validation}
+- logging: {level, file, sanitization}
+- cache: {ttls}
+- ui: {settings}
+- timeouts: {por operación}
+
+consulta_ad_streamlit.py nuevas funciones:
 - load_config()
 - get_config(path, default)
-- validate_dn(dn, require_scope)
-- validate_search_criteria(criteria)
-- validate_password(pwd)
+- validate_dn()
+- validate_search_criteria()
+- validate_password()
+
+Imports nuevos:
+- logging
+- yaml
+- typing (Optional, Dict, List, Any)
+- functools (lru_cache)
+- re (reservado para futura validación)
 ```
 
-### requirements.txt
-```
-+ PyYAML
-+ pyad (actualizado)
-+ pywin32 (actualizado)
+### Fase 2: Type Hints (100%)
+```python
+# Todos los tipos completados:
+
+# Query functions
+def get_user_data(identifier: str) -> Optional[Dict[str, Any]]
+def get_computer_data(samname: str) -> Optional[Dict[str, Any]]
+def get_groups_from_dn(user_dn: str) -> List[str]
+def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]
+
+# Write operations
+def unlock_user_by_dn(user_dn: str) -> None
+def reset_password_by_dn(user_dn: str, new_password: str) -> None
+def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None
+
+# Cache/Export
+def reset_user_caches_for_dn(dn: str) -> None
+def ensure_export_ready(dn: str, user_data: Dict[str, Any]) -> None
+def build_user_export_txt(user_data: Dict[str, Any], groups: List[str]) -> bytes
+def build_user_export_csv(user_data: Dict[str, Any], groups: List[str]) -> bytes
+
+# Password
+def generate_temp_password(length: int = 14) -> str
+def looks_weak_password(pwd: str) -> bool
+
+# UI Rendering
+def render_card(k: str, v: Any) -> None
+def render_bloqueado_row(bloqueado_bool: bool, dn: str, criterio: str) -> None
+def render_reset_password_section(dn: str) -> None
+def render_move_computer_card(in_default: bool, dn: str, criterio: str) -> None
+def run_search(modo: str, criterio: str) -> None
+
+# Validation
+def validate_dn(dn: str, require_scope: bool = False) -> bool
+def validate_search_criteria(criteria: str) -> tuple[bool, str]
+def validate_password(pwd: str) -> tuple[bool, str]
 ```
 
 ---
 
-## Próximos Pasos
+## Próximas Fases Estimadas
 
-### Inmediato (siguiente commit)
-1. Completar type hints en todas las funciones (regex para automatizar)
-2. Agregar `logger` calls en operaciones críticas
-3. Mejorar manejo de excepciones (usar tipos específicos)
-4. Validar entrada en `unlock_user_by_dn()`, `reset_password_by_dn()`, `move_computer_to_target_ou()`
+### Fase 3: Logging Granular (~45 minutos)
+- Agregar `logger.info()` en inicio/fin de operaciones
+- Agregar `logger.debug()` en detalles técnicos
+- Agregar `logger.error()` con exc_info=True
 
-### A Corto Plazo
-1. Implementar cache con TTL
-2. Agregar spinners en operaciones largas
-3. Expandir test suite
+### Fase 4: Error Handling (~1 hora)
+- Reemplazar `except Exception` genéricos
+- Usar tipos específicos (`ADObjectNotFound`, etc)
+- Mensajes de error más descriptivos
 
-### A Mediano Plazo
-1. Actualizar toda la documentación existente
-2. Crear guía de migración de constantes a config.yaml
-3. Crear guía de debugging con logs
+### Fase 5: Cache con TTL (~1 hora)
+- Función `get_from_cache(key, ttl_minutes)`
+- Función `set_in_cache(key, value)`
+- Aplicar a user_data, computer_data, groups
 
----
-
-## Notas Importantes
-
-- **Config fallback**: Si `config.yaml` no existe, usa valores por defecto
-- **Logging**: Configurado pero aún con pocos logs (se agregan en fase 2)
-- **Type hints**: Parcialmente completados, se terminan en la siguiente pass
-- **Validación**: Implementada pero no está integrada en el flujo principal aún
-- **PyYAML**: Ya instalado, importable desde imports
+### Fase 6: Final (~1 hora)
+- Spinners en operaciones >2 segundos
+- Tests expandidos (validation, edge cases)
+- Documentación actualizada
 
 ---
 
 ## Estadísticas
 
-| Métrica | Estado |
-|---------|--------|
-| Type hints completados | ~20% |
-| Logging agregado | ~5% |
-| Validación de entrada | ~30% (funciones creadas, no integradas) |
-| Cache con TTL | 0% |
-| UI spinners mejorados | ~20% |
-| Tests nuevos | 0% |
-| Documentación actualizada | 0% |
+| Fase | Estado | % | Commits |
+|------|--------|-------|---------|
+| 1. Config + Logging | ✅ Completado | 100% | 31f35db |
+| 2. Type Hints | ✅ Completado | 100% | 10f4381 |
+| 3. Logging Granular | ⏳ Próximo | 0% | — |
+| 4. Error Handling | 📋 Pendiente | 0% | — |
+| 5. Cache + TTL | 📋 Pendiente | 0% | — |
+| 6. Spinners + Tests | 📋 Pendiente | 0% | — |
+| **TOTAL** | **50%** | **50%** | **2** |
 
-**Meta:** Tener >80% de tipo hints, >50% de logging, validación integrada, tests expandidos para terminar refactor.
+---
+
+## Cómo continuar
+
+### Opción A: Completar todas las fases (3-4 horas más)
+```bash
+# Fase 3: Logging
+git checkout -b feature/logging-granular
+# ... agregar logger.info/error/debug
+
+# Fase 4: Error Handling
+git checkout -b feature/error-handling
+# ... diferenciar tipos de exception
+
+# Fase 5: Cache TTL
+git checkout -b feature/cache-ttl
+# ... implementar sistema de cache
+
+# Fase 6: Spinners + Tests
+git checkout -b feature/spinners-tests
+# ... agregar UI improvements + tests
+```
+
+### Opción B: Deployment actual (50% completado)
+- ✅ Config management funciona
+- ✅ Type hints ayudan a IDE/debugging
+- ✅ Validadores disponibles (no integrados aún)
+- ✅ Logger disponible (pocos logs)
+
+El refactor actual es seguro para deployment - mejora IDE support y tiene base para logging.
+
+---
+
+## Notas
+
+- **Config fallback:** Si no existe `config.yaml`, usa defaults - compatible backward
+- **Type hints:** 100% completados - no hay restricción de funcionalidad
+- **Logging:** Infraestructura lista, pocos logs agregados aún
+- **Validadores:** Creados pero no integrados en flujo principal
+- **No breaking changes:** Todo es additive, código existente funciona igual
+
+---
+
+Ver commits para detalles técnicos:
+- https://github.com/prdrguez/ConsultaAD/commit/31f35db
+- https://github.com/prdrguez/ConsultaAD/commit/10f4381
+
