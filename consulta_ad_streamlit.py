@@ -324,6 +324,98 @@ def validate_password(pwd: str) -> tuple[bool, str]:
     return True, ""
 
 
+# =====================================================
+# Cache con TTL (Fase 5: Automatic cache expiration)
+# =====================================================
+class CacheWithTTL:
+    """
+    Sistema de caché simple con expiration de tiempo.
+    
+    Almacena resultados AD en memoria con timeout automático.
+    Se utiliza para evitar queries repetidas en corto tiempo.
+    """
+    
+    def __init__(self):
+        """Inicializa el caché vacío."""
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        logger.info("✓ Cache inicializado (TTL automático habilitado)")
+    
+    def set(self, key: str, value: Any, ttl_minutes: int = 5) -> None:
+        """
+        Guarda un valor en caché con expiración.
+        
+        Args:
+            key: Clave de caché
+            value: Valor a guardar
+            ttl_minutes: Tiempo en minutos antes de expirar (default: 5)
+        """
+        expiration = datetime.now(tz=timezone.utc) + timedelta(minutes=ttl_minutes)
+        self._cache[key] = {
+            "value": value,
+            "expires_at": expiration
+        }
+        logger.debug(f"Cache SET: {key} (TTL: {ttl_minutes}min, expires at {expiration.isoformat()})")
+    
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Obtiene un valor del caché si existe y no ha expirado.
+        
+        Args:
+            key: Clave de caché
+        
+        Returns:
+            Valor guardado, o None si no existe o expiró
+        """
+        if key not in self._cache:
+            logger.debug(f"Cache MISS: {key} (no existe)")
+            return None
+        
+        entry = self._cache[key]
+        expiration = entry.get("expires_at")
+        
+        if expiration and datetime.now(tz=timezone.utc) > expiration:
+            logger.debug(f"Cache EXPIRED: {key} (expirado)")
+            del self._cache[key]
+            return None
+        
+        logger.debug(f"Cache HIT: {key}")
+        return entry.get("value")
+    
+    def invalidate(self, key: str) -> None:
+        """
+        Invalida una clave de caché (la elimina).
+        
+        Args:
+            key: Clave a eliminar
+        """
+        if key in self._cache:
+            del self._cache[key]
+            logger.debug(f"Cache INVALIDATED: {key}")
+    
+    def clear(self) -> None:
+        """Limpia todo el caché."""
+        self._cache.clear()
+        logger.info("Cache cleared (todas las entradas eliminadas)")
+    
+    def get_stats(self) -> Dict[str, int]:
+        """
+        Retorna estadísticas del caché.
+        
+        Returns:
+            Dict con cantidad de entradas y entradas vencidas
+        """
+        now = datetime.now(tz=timezone.utc)
+        total = len(self._cache)
+        expired = sum(1 for e in self._cache.values() 
+                     if e.get("expires_at") and e["expires_at"] <= now)
+        active = total - expired
+        return {"total": total, "active": active, "expired": expired}
+
+
+# Instancia global del caché
+_cache = CacheWithTTL()
+
+
 # Funciones auxiliares
 # =====================================================
 
@@ -678,6 +770,8 @@ def unlock_user_by_dn(user_dn: str) -> None:
             if hasattr(obj, "commit"):
                 obj.commit()
                 logger.info("✓ Usuario desbloqueado exitosamente (pyad)")
+                # Invalidar caché (Fase 5: Invalidar tras operación de escritura)
+                _cache.invalidate(f"user_data:{user_dn}")
 
             del obj
             return
@@ -704,6 +798,8 @@ def unlock_user_by_dn(user_dn: str) -> None:
             adsi.Put("lockoutTime", 0)
             adsi.SetInfo()
             logger.info("✓ Usuario desbloqueado exitosamente (ADSI fallback)")
+            # Invalidar caché (Fase 5: Invalidar tras operación de escritura)
+            _cache.invalidate(f"user_data:{user_dn}")
             del adsi
             return
         except PermissionError as e:
@@ -761,6 +857,8 @@ def reset_password_by_dn(user_dn: str, new_password: str) -> None:
 
             user.SetInfo()
             logger.info("✓ Contraseña reseteada exitosamente")
+            # Invalidar caché (Fase 5: Invalidar tras operación de escritura)
+            _cache.invalidate(f"user_data:{user_dn}")
             del user
         except PermissionError as e:
             logger.error(f"✗ Permisos insuficientes para reset de contraseña: {e}", exc_info=True)
@@ -819,6 +917,12 @@ def move_computer_to_target_ou(computer_dn: str, target_ou_dn: str) -> None:
             target.MoveHere(f"LDAP://{computer_dn}", None)
             
             logger.info("✓ Equipo movido exitosamente")
+            # Invalidar caché (Fase 5: Invalidar tras operación de escritura)
+            # Extraer SAMAccountName del DN para invalidar cualquier referencia
+            import re
+            match = re.search(r'CN=([^,]+)', computer_dn)
+            if match:
+                _cache.invalidate(f"computer_data:{match.group(1)}")
             del target
         except PermissionError as e:
             logger.error(f"✗ Permisos insuficientes para mover equipo: {e}", exc_info=True)
@@ -881,7 +985,14 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
     Nota:
         Retorna solo el PRIMER resultado (first match).
         lastLogonTimestamp es aproximado (se replica entre DCs).
+        Resultado se cachea por 5 minutos por defecto.
     """
+    # Verificar caché (Fase 5: TTL automático)
+    cache_key = f"user_data:{identifier}"
+    cached_result = _cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     try:
         logger.debug(f"Iniciando búsqueda de usuario: {identifier[:20]}...")
         
@@ -931,7 +1042,7 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
         
         logger.debug(f"Bloqueado={bloqueado}, Habilitado={habilitado}, OU={extract_ou(dn)}")
 
-        return {
+        result = {
             "_dn": dn,
             "_bloqueado_bool": bool(bloqueado_bool),
             "_uac": uac_raw,
@@ -951,6 +1062,12 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
             "Pwd last set": filetime_to_dt_str(row.get("pwdLastSet")),
             "Último logon (aprox.)": filetime_to_dt_str(row.get("lastLogonTimestamp")),
         }
+        
+        # Guardar en caché (Fase 5: TTL automático)
+        ttl_minutes = get_config("cache.user_ttl_minutes", 5)
+        _cache.set(cache_key, result, ttl_minutes)
+        
+        return result
 
     except ValueError as e:
         logger.error(f"✗ Validación fallida: {e}")
@@ -982,10 +1099,17 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
     Nota:
         No incluye membresía transitiva (grupos de grupos).
         memberOf contiene DNs completos; extrae solo el CN.
+        Resultado se cachea por 10 minutos por defecto.
     """
     if not user_dn:
         logger.debug("get_groups_from_dn llamado con DN vacío")
         return []
+
+    # Verificar caché (Fase 5: TTL automático)
+    cache_key = f"groups_from_dn:{user_dn}"
+    cached_result = _cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
 
     try:
         logger.debug(f"Obteniendo grupos para: {user_dn[:50]}...")
@@ -1016,8 +1140,15 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
             groups_list = [str(groups)]
 
         clean = [format_group_dn_to_cn(dn) for dn in groups_list if dn]
-        logger.info(f"✓ {len(clean)} grupos encontrados para usuario")
-        return sorted(clean, key=lambda x: x.lower())
+        result = sorted(clean, key=lambda x: x.lower())
+        
+        logger.info(f"✓ {len(result)} grupos encontrados para usuario")
+        
+        # Guardar en caché (Fase 5: TTL automático)
+        ttl_minutes = get_config("cache.groups_ttl_minutes", 10)
+        _cache.set(cache_key, result, ttl_minutes)
+        
+        return result
 
     except Exception as e:
         logger.error(f"✗ Error obteniendo grupos: {type(e).__name__}: {e}", exc_info=True)
