@@ -64,9 +64,9 @@ reports:
 # ============================================================
 cache:
   # Time-to-live en minutos para datos cacheados
-  user_data_ttl_minutes: 10
-  computer_data_ttl_minutes: 10
-  groups_ttl_minutes: 5
+  user_ttl_minutes: 5           # Búsquedas de usuarios
+  groups_ttl_minutes: 10        # Búsquedas de grupos (menos variable)
+  computer_ttl_minutes: 5       # Búsquedas de equipos
   
   # Limpiar cache automáticamente
   auto_clear_on_new_search: true
