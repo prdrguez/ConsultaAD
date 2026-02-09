@@ -232,6 +232,7 @@ logger.info(f"AD Config: domain={DOMAIN_DN}, scope_ou={SCOPE_OU_DN}")
 # Configuración WMI
 # =====================================================
 WMI_ENABLED = bool(get_config("wmi.enabled", True))
+WMI_TIMEOUT_SECONDS = int(get_config("wmi.timeout_seconds", 6))
 
 
 # =====================================================
@@ -516,7 +517,10 @@ def _run_powershell_json(script: str, timeout_seconds: int = 25) -> Any:
 
     if completed.returncode != 0:
         msg = stderr or stdout or f"PowerShell error (code {completed.returncode})"
-        raise RuntimeError(msg)
+        msg = msg.strip()
+        if msg:
+            msg = msg.splitlines()[0]
+        raise RuntimeError(msg or f"PowerShell error (code {completed.returncode})")
 
     if not stdout:
         raise RuntimeError("PowerShell no devolvió salida.")
@@ -525,6 +529,24 @@ def _run_powershell_json(script: str, timeout_seconds: int = 25) -> Any:
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Salida JSON inválida: {exc}") from exc
+
+
+def _summarize_wmi_error(msg: str) -> str:
+    clean = (msg or "").strip()
+    if not clean:
+        return "Error WMI/CIM."
+
+    lower = clean.lower()
+    if "winrm" in lower:
+        return "WinRM no disponible o bloqueado."
+    if "rpc server is unavailable" in lower or "rpc" in lower:
+        return "RPC no disponible (host inaccesible o firewall)."
+    if "access is denied" in lower or "access denied" in lower:
+        return "Acceso denegado."
+    if "timeout" in lower or "timed out" in lower:
+        return "Timeout consultando WMI."
+
+    return clean
 
 
 def _sanitize_wmi_host(host: Any) -> str:
@@ -581,13 +603,15 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
     if not host:
         raise ValueError("Host vacío para consulta WMI.")
 
+    timeout_seconds = max(3, min(20, int(WMI_TIMEOUT_SECONDS)))
+
     cim_script = (
         "$ErrorActionPreference = 'Stop'; "
         "$ProgressPreference = 'SilentlyContinue'; "
         f"$target = '{host}'; "
-        "$cs = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $target; "
-        "$bios = Get-CimInstance -ClassName Win32_BIOS -ComputerName $target; "
-        "$os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $target; "
+        "$cs = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $target -OperationTimeoutSec 5; "
+        "$bios = Get-CimInstance -ClassName Win32_BIOS -ComputerName $target -OperationTimeoutSec 5; "
+        "$os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $target -OperationTimeoutSec 5; "
         "$lastBoot = $os.LastBootUpTime; "
         "if ($lastBoot) { $lastBoot = (Get-Date $lastBoot -Format 'dd/MM/yyyy HH:mm') } "
         "$inv = [ordered]@{ "
@@ -627,16 +651,16 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
 
     cim_error = None
     try:
-        data = _run_powershell_json(cim_script)
+        data = _run_powershell_json(cim_script, timeout_seconds=timeout_seconds)
         return _normalize_wmi_inventory(data, host)
     except Exception as exc:
-        cim_error = str(exc)
+        cim_error = _summarize_wmi_error(str(exc))
 
     try:
-        data = _run_powershell_json(wmi_script)
+        data = _run_powershell_json(wmi_script, timeout_seconds=timeout_seconds)
         return _normalize_wmi_inventory(data, host)
     except Exception as exc:
-        wmi_error = str(exc)
+        wmi_error = _summarize_wmi_error(str(exc))
         raise RuntimeError(f"CIM falló: {cim_error}. WMI falló: {wmi_error}")
 
 
@@ -2176,11 +2200,16 @@ def main():
 
                 if wmi_data is None and wmi_error is None:
                     try:
-                        wmi_data = get_wmi_inventory_cached(target_host)
+                        with st.spinner("Consultando WMI/CIM…"):
+                            wmi_data = get_wmi_inventory_cached(target_host)
                         st.session_state["wmi_data"] = wmi_data or {}
                         st.session_state["wmi_error"] = None
                     except Exception as e:
-                        wmi_error = str(e)
+                        err_text = str(e)
+                        if "CIM falló" in err_text:
+                            wmi_error = err_text
+                        else:
+                            wmi_error = _summarize_wmi_error(err_text)
                         st.session_state["wmi_data"] = {}
                         st.session_state["wmi_error"] = wmi_error
 
