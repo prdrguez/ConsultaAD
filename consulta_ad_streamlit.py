@@ -21,7 +21,7 @@ Uso:
 """
 
 import streamlit as st
-import pyad.adquery
+from pyad import adquery
 import pythoncom
 import html
 import pandas as pd
@@ -32,7 +32,6 @@ import threading
 import secrets
 import string
 import logging
-import re
 import yaml
 from typing import Optional, Dict, List, Any
 from pyad import adobject
@@ -996,7 +995,7 @@ def get_user_data(identifier: str) -> Optional[Dict[str, Any]]:
     try:
         logger.debug(f"Iniciando búsqueda de usuario: {identifier[:20]}...")
         
-        q = pyad.adquery.ADQuery()
+        q = adquery.ADQuery()
 
         ident = safe_where_value(identifier)
         where = (
@@ -1113,7 +1112,7 @@ def get_groups_from_dn(user_dn: str) -> List[str]:
 
     try:
         logger.debug(f"Obteniendo grupos para: {user_dn[:50]}...")
-        q = pyad.adquery.ADQuery()
+        q = adquery.ADQuery()
         dn_safe = safe_where_value(user_dn)
 
         logger.debug("Ejecutando query de memberOf")
@@ -1203,7 +1202,7 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
 
         logger.debug(f"Query LDAP para equipo: sAMAccountName='{sam_safe}'")
         
-        q = pyad.adquery.ADQuery()
+        q = adquery.ADQuery()
         q.execute_query(
             attributes=[
                 "distinguishedName", "sAMAccountName", "description",
@@ -1279,7 +1278,7 @@ def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
     logger.info(f"📊 Iniciando reporte de inactividad: {kind} > {days} días")
     
     with com_context():
-        q = pyad.adquery.ADQuery()
+        q = adquery.ADQuery()
 
         cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(days=int(days))
         cutoff_ft = dt_to_filetime(cutoff_dt)
@@ -1315,7 +1314,7 @@ def fetch_inactives(kind: str, days: int) -> List[Dict[str, Any]]:
 
         if not rows:
             logger.debug("Query SCOPE_OU_DN sin resultados, filtrando desde búsqueda global")
-            q = pyad.adquery.ADQuery()
+            q = adquery.ADQuery()
             q.execute_query(attributes=attrs, where_clause=where)
             all_rows = list(q.get_results())
             rows = [r for r in all_rows if dn_is_under_scope_ou(r.get("distinguishedName", ""))]
@@ -1684,7 +1683,7 @@ def render_move_computer_card(in_default: bool, dn: str, criterio: str) -> None:
         return
 
     st.markdown(
-        f"""
+        """
         <div style='
             background: #262626;
             padding: 18px 22px;
@@ -1744,269 +1743,274 @@ def run_search(modo: str, criterio: str) -> None:
     st.session_state["data"] = data
 
 
-# =====================================================
-# Streamlit UI - Configuración
-# =====================================================
+def main():
+    # =====================================================
+    # Streamlit UI - Configuración
+    # =====================================================
 
-st.set_page_config(page_title="Consulta AD", page_icon="🖥️", layout="wide")
+    st.set_page_config(page_title="Consulta AD", page_icon="🖥️", layout="wide")
 
-with st.sidebar:
-    st.header("🔎 Consulta AD")
+    with st.sidebar:
+        st.header("🔎 Consulta AD")
 
-    modo = st.radio("¿Qué querés hacer?", ["Usuario", "Equipo", "Reportes"], key="modo_radio")
-    debug = st.checkbox("🧪 Modo debug", value=False)
+        modo = st.radio("¿Qué querés hacer?", ["Usuario", "Equipo", "Reportes"], key="modo_radio")
+        debug = st.checkbox("🧪 Modo debug", value=False)
 
-    if modo in ("Usuario", "Equipo"):
-        if modo == "Usuario":
-            criterio = st.text_input("Buscar por usuario, mail o UPN", key="criterio_input")
+        if modo in ("Usuario", "Equipo"):
+            if modo == "Usuario":
+                criterio = st.text_input("Buscar por usuario, mail o UPN", key="criterio_input")
+            else:
+                criterio = st.text_input("Buscar por nombre de equipo (SAMAccountName)", key="criterio_input")
+
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                buscar = st.button("Buscar 🔍", use_container_width=True)
+            with col_btn2:
+                limpiar = st.button("Limpiar", use_container_width=True)
+
         else:
-            criterio = st.text_input("Buscar por nombre de equipo (SAMAccountName)", key="criterio_input")
+            st.caption("Reportes basados en lastLogonTimestamp (aprox.).")
+            st.caption(f"Scope: {SCOPE_OU_DN}")
 
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            buscar = st.button("Buscar 🔍", use_container_width=True)
-        with col_btn2:
+            tipo_rep = st.selectbox("Tipo de reporte", ["Usuarios", "Equipos"], key="rep_tipo")
+            dias = st.selectbox("Inactividad mayor a…", [30, 60, 90, 120, 180, 365], index=2, key="rep_dias")
+            ejecutar_rep = st.button("Generar reporte", use_container_width=True)
+
             limpiar = st.button("Limpiar", use_container_width=True)
 
-    else:
-        st.caption("Reportes basados en lastLogonTimestamp (aprox.).")
-        st.caption(f"Scope: {SCOPE_OU_DN}")
-
-        tipo_rep = st.selectbox("Tipo de reporte", ["Usuarios", "Equipos"], key="rep_tipo")
-        dias = st.selectbox("Inactividad mayor a…", [30, 60, 90, 120, 180, 365], index=2, key="rep_dias")
-        ejecutar_rep = st.button("Generar reporte", use_container_width=True)
-
-        limpiar = st.button("Limpiar", use_container_width=True)
-
-if "limpiar" in locals() and limpiar:
-    st.session_state.clear()
-    st.rerun()
+    if "limpiar" in locals() and limpiar:
+        st.session_state.clear()
+        st.rerun()
 
 
-# =====================================================
-# Área Principal: Usuario / Equipo (búsqueda)
-# =====================================================
+    # =====================================================
+    # Área Principal: Usuario / Equipo (búsqueda)
+    # =====================================================
 
-if modo in ("Usuario", "Equipo"):
-    if "buscar" in locals() and buscar:
-        run_search(modo, criterio)
+    if modo in ("Usuario", "Equipo"):
+        if "buscar" in locals() and buscar:
+            run_search(modo, criterio)
 
-    data = st.session_state.get("data")
+        data = st.session_state.get("data")
 
-    if data is None:
-        st.info("Usá el buscador de la izquierda para consultar un usuario o equipo.")
-        st.stop()
+        if data is None:
+            st.info("Usá el buscador de la izquierda para consultar un usuario o equipo.")
+            st.stop()
 
-    if not data:
-        st.error("No se encontraron resultados.")
-        st.stop()
+        if not data:
+            st.error("No se encontraron resultados.")
+            st.stop()
 
-    if "error" in data:
-        st.error(f"Error: {data['error']}")
-        st.stop()
+        if "error" in data:
+            st.error(f"Error: {data['error']}")
+            st.stop()
 
-    last_modo = st.session_state.get("last_modo", modo)
-    last_criterio = st.session_state.get("last_criterio", "")
-    st.success(f"{last_modo} encontrado:")
+        last_modo = st.session_state.get("last_modo", modo)
+        last_criterio = st.session_state.get("last_criterio", "")
+        st.success(f"{last_modo} encontrado:")
 
-    if last_modo == "Usuario" and debug:
-        with st.expander("🧪 Debug AD"):
-            st.write("**DN:**", data.get("_dn"))
-            st.write("**lockoutTime (raw):**", data.get("_lockoutTime_raw"))
-            st.write("**lockoutTime (int):**", data.get("_lockoutTime_int"))
-            st.write("**userAccountControl:**", data.get("_uac"))
-            st.write("**bloqueado_bool:**", data.get("_bloqueado_bool"))
+        if last_modo == "Usuario" and debug:
+            with st.expander("🧪 Debug AD"):
+                st.write("**DN:**", data.get("_dn"))
+                st.write("**lockoutTime (raw):**", data.get("_lockoutTime_raw"))
+                st.write("**lockoutTime (int):**", data.get("_lockoutTime_int"))
+                st.write("**userAccountControl:**", data.get("_uac"))
+                st.write("**bloqueado_bool:**", data.get("_bloqueado_bool"))
 
-    if last_modo == "Equipo" and debug:
-        with st.expander("🧪 Debug AD"):
-            st.write("**DN:**", data.get("_dn"))
-            st.write("**in_default_ou:**", data.get("_in_default_ou"))
-            st.write("**Default OU DN:**", DEFAULT_COMPUTERS_OU_DN)
-            st.write("**Target OU DN:**", TARGET_WKS_OU_DN)
+        if last_modo == "Equipo" and debug:
+            with st.expander("🧪 Debug AD"):
+                st.write("**DN:**", data.get("_dn"))
+                st.write("**in_default_ou:**", data.get("_in_default_ou"))
+                st.write("**Default OU DN:**", DEFAULT_COMPUTERS_OU_DN)
+                st.write("**Target OU DN:**", TARGET_WKS_OU_DN)
 
-    if last_modo == "Usuario":
-        dn = data.get("_dn", "")
-        bloqueado_bool = bool(data.get("_bloqueado_bool", False))
+        if last_modo == "Usuario":
+            dn = data.get("_dn", "")
+            bloqueado_bool = bool(data.get("_bloqueado_bool", False))
 
-        if dn and st.session_state.get("groups_dn") != dn:
-            reset_user_caches_for_dn(dn)
+            if dn and st.session_state.get("groups_dn") != dn:
+                reset_user_caches_for_dn(dn)
 
-        visibles = {k: v for k, v in data.items() if k not in _INTERNAL_KEYS}
+            visibles = {k: v for k, v in data.items() if k not in _INTERNAL_KEYS}
 
-        left_keys = ["Usuario", "Nombre", "Mail", "UPN", "Descripción", "Bloqueado"]
-        right_keys = ["Creado", "Modificado", "Habilitado", "Pwd last set", "Último logon (aprox.)", "OU"]
+            left_keys = ["Usuario", "Nombre", "Mail", "UPN", "Descripción", "Bloqueado"]
+            right_keys = ["Creado", "Modificado", "Habilitado", "Pwd last set", "Último logon (aprox.)", "OU"]
 
-        col1, col2 = st.columns(2)
-        with col1:
-            for k in left_keys:
-                if k not in visibles:
-                    continue
-                if k == "Bloqueado":
-                    render_bloqueado_row(bloqueado_bool, dn, last_criterio)
-                else:
+            col1, col2 = st.columns(2)
+            with col1:
+                for k in left_keys:
+                    if k not in visibles:
+                        continue
+                    if k == "Bloqueado":
+                        render_bloqueado_row(bloqueado_bool, dn, last_criterio)
+                    else:
+                        render_card(k, visibles[k])
+
+            with col2:
+                for k in right_keys:
+                    if k not in visibles:
+                        continue
                     render_card(k, visibles[k])
 
-        with col2:
-            for k in right_keys:
-                if k not in visibles:
-                    continue
-                render_card(k, visibles[k])
+                extra = [k for k in visibles.keys() if k not in set(left_keys + right_keys)]
+                for k in extra:
+                    render_card(k, visibles[k])
 
-            extra = [k for k in visibles.keys() if k not in set(left_keys + right_keys)]
-            for k in extra:
-                render_card(k, visibles[k])
+            st.markdown("---")
 
-        st.markdown("---")
+            # Acciones: ahora el reset está bien protegido y no molesta
+            with st.expander("🧰 Acciones", expanded=False):
+                if dn:
+                    render_reset_password_section(dn)
+                else:
+                    st.info("No hay DN para ejecutar acciones.")
 
-        # Acciones: ahora el reset está bien protegido y no molesta
-        with st.expander("🧰 Acciones", expanded=False):
-            if dn:
-                render_reset_password_section(dn)
-            else:
-                st.info("No hay DN para ejecutar acciones.")
+            # Grupos + Export (mismo expander)
+            with st.expander("📁 Ver grupos del usuario", expanded=False):
+                if not dn:
+                    st.write("No hay DN para este usuario.")
+                    st.stop()
 
-        # Grupos + Export (mismo expander)
-        with st.expander("📁 Ver grupos del usuario", expanded=False):
-            if not dn:
-                st.write("No hay DN para este usuario.")
-                st.stop()
+                grupos = st.session_state.get("groups_list")
+                groups_error = st.session_state.get("groups_error")
 
-            grupos = st.session_state.get("groups_list")
-            groups_error = st.session_state.get("groups_error")
+                if grupos is None and not groups_error:
+                    if st.button("📥 Cargar grupos", key=stable_key("loadgroups", dn), use_container_width=True, type="primary"):
+                        with com_context():
+                            with st.spinner("Leyendo grupos desde Active Directory…"):
+                                g = get_groups_from_dn(dn)
 
-            if grupos is None and not groups_error:
-                if st.button("📥 Cargar grupos", key=stable_key("loadgroups", dn), use_container_width=True, type="primary"):
-                    with com_context():
-                        with st.spinner("Leyendo grupos desde Active Directory…"):
-                            g = get_groups_from_dn(dn)
+                        if g and isinstance(g, list) and str(g[0]).startswith("Error obteniendo grupos:"):
+                            st.session_state["groups_error"] = g[0]
+                            st.session_state["groups_list"] = []
+                        else:
+                            st.session_state["groups_list"] = g or []
+                            st.session_state["groups_error"] = None
 
-                    if g and isinstance(g, list) and str(g[0]).startswith("Error obteniendo grupos:"):
-                        st.session_state["groups_error"] = g[0]
-                        st.session_state["groups_list"] = []
+                        ensure_export_ready(dn, data)
+                        grupos = st.session_state.get("groups_list")
+                        groups_error = st.session_state.get("groups_error")
                     else:
-                        st.session_state["groups_list"] = g or []
-                        st.session_state["groups_error"] = None
+                        st.caption("Tip: puede demorar si el usuario tiene muchos grupos.")
+                        st.stop()
 
-                    ensure_export_ready(dn, data)
-                    st.rerun()
+                if groups_error:
+                    st.error(groups_error)
 
-                st.caption("Tip: puede demorar si el usuario tiene muchos grupos.")
-                st.stop()
+                grupos = st.session_state.get("groups_list") or []
+                st.write(f"Total grupos: **{len(grupos)}**")
 
-            if groups_error:
-                st.error(groups_error)
+                colR1, colR2 = st.columns([1, 3])
+                with colR1:
+                    if st.button("🔄 Refrescar", key=stable_key("refgroups", dn), use_container_width=True):
+                        st.session_state.pop("groups_list", None)
+                        st.session_state.pop("groups_error", None)
+                        st.session_state.pop("export_txt_bytes", None)
+                        st.session_state.pop("export_csv_bytes", None)
+                        st.session_state.pop("export_stamp", None)
+                        st.session_state.pop("export_stamp_dn", None)
+                        st.rerun()
+                with colR2:
+                    st.caption("Refresca la lista desde AD.")
 
-            grupos = st.session_state.get("groups_list") or []
-            st.write(f"Total grupos: **{len(grupos)}**")
+                if len(grupos) == 0:
+                    st.write("El usuario no pertenece a ningún grupo.")
+                else:
+                    gcol1, gcol2, gcol3 = st.columns(3)
+                    for i, g in enumerate(grupos):
+                        g_safe = html.escape(str(g))
+                        pill = f"""
+                        <div style="
+                            background-color: #2c2c2c;
+                            padding: 6px 12px;
+                            border-radius: 20px;
+                            margin: 4px 0;
+                            display: inline-block;
+                            font-size: 14px;
+                            border: 1px solid rgba(255,255,255,0.15);
+                        ">
+                            🔹 {g_safe}
+                        </div>
+                        """
+                        if i % 3 == 0:
+                            gcol1.markdown(pill, unsafe_allow_html=True)
+                        elif i % 3 == 1:
+                            gcol2.markdown(pill, unsafe_allow_html=True)
+                        else:
+                            gcol3.markdown(pill, unsafe_allow_html=True)
 
-            colR1, colR2 = st.columns([1, 3])
-            with colR1:
-                if st.button("🔄 Refrescar", key=stable_key("refgroups", dn), use_container_width=True):
-                    st.session_state.pop("groups_list", None)
-                    st.session_state.pop("groups_error", None)
-                    st.session_state.pop("export_txt_bytes", None)
-                    st.session_state.pop("export_csv_bytes", None)
-                    st.session_state.pop("export_stamp", None)
-                    st.session_state.pop("export_stamp_dn", None)
-                    st.rerun()
-            with colR2:
-                st.caption("Refresca la lista desde AD.")
+                ensure_export_ready(dn, data)
+                st.markdown("### ⬇️ Exportar usuario + grupos")
 
-            if len(grupos) == 0:
-                st.write("El usuario no pertenece a ningún grupo.")
-            else:
-                gcol1, gcol2, gcol3 = st.columns(3)
-                for i, g in enumerate(grupos):
-                    g_safe = html.escape(str(g))
-                    pill = f"""
-                    <div style="
-                        background-color: #2c2c2c;
-                        padding: 6px 12px;
-                        border-radius: 20px;
-                        margin: 4px 0;
-                        display: inline-block;
-                        font-size: 14px;
-                        border: 1px solid rgba(255,255,255,0.15);
-                    ">
-                        🔹 {g_safe}
-                    </div>
-                    """
-                    if i % 3 == 0:
-                        gcol1.markdown(pill, unsafe_allow_html=True)
-                    elif i % 3 == 1:
-                        gcol2.markdown(pill, unsafe_allow_html=True)
-                    else:
-                        gcol3.markdown(pill, unsafe_allow_html=True)
+                export_txt = st.session_state.get("export_txt_bytes")
+                export_csv = st.session_state.get("export_csv_bytes")
+                stamp = st.session_state.get("export_stamp") or "export"
+                user_sam = str(visibles.get("Usuario", "usuario")).replace("$", "")
 
-            ensure_export_ready(dn, data)
-            st.markdown("### ⬇️ Exportar usuario + grupos")
+                if not export_txt or not export_csv:
+                    st.caption("Export no listo (volver a cargar grupos).")
+                else:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.download_button(
+                            "✅ Descargar TXT (con grupos)",
+                            data=export_txt,
+                            file_name=f"{user_sam}_export_con_grupos_{stamp}.txt",
+                            mime="text/plain",
+                            use_container_width=True,
+                            key=stable_key("dl_txt_full", dn),
+                        )
+                    with c2:
+                        st.download_button(
+                            "✅ Descargar CSV (con grupos)",
+                            data=export_csv,
+                            file_name=f"{user_sam}_export_con_grupos_{stamp}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                            key=stable_key("dl_csv_full", dn),
+                        )
 
-            export_txt = st.session_state.get("export_txt_bytes")
-            export_csv = st.session_state.get("export_csv_bytes")
-            stamp = st.session_state.get("export_stamp") or datetime.now().strftime("%Y%m%d_%H%M%S")
-            user_sam = str(visibles.get("Usuario", "usuario")).replace("$", "")
-
-            if not export_txt or not export_csv:
-                st.caption("Export no listo (volver a cargar grupos).")
-            else:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.download_button(
-                        "✅ Descargar TXT (con grupos)",
-                        data=export_txt,
-                        file_name=f"{user_sam}_export_con_grupos_{stamp}.txt",
-                        mime="text/plain",
-                        use_container_width=True,
-                        key=stable_key("dl_txt_full", dn),
-                    )
-                with c2:
-                    st.download_button(
-                        "✅ Descargar CSV (con grupos)",
-                        data=export_csv,
-                        file_name=f"{user_sam}_export_con_grupos_{stamp}.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        key=stable_key("dl_csv_full", dn),
-                    )
-
-    else:
-        # Equipo
-        dn = data.get("_dn", "")
-        in_default = bool(data.get("_in_default_ou", False))
+        else:
+            # Equipo
+            dn = data.get("_dn", "")
+            in_default = bool(data.get("_in_default_ou", False))
 
         visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
+
+        items = list(visibles.items())
+        mid = len(items) // 2
 
         col1, col2 = st.columns(2)
         with col1:
             if dn and in_default:
                 render_move_computer_card(in_default, dn, last_criterio)
 
-            items = list(visibles.items())
-            mid = len(items) // 2
             for k, v in items[:mid]:
                 render_card(k, v)
 
         with col2:
-            items = list(visibles.items())
-            mid = len(items) // 2
             for k, v in items[mid:]:
                 render_card(k, v)
 
-else:
-    # =====================================================
-    # Área Principal: Reportes (inactividad)
-    # =====================================================
+    else:
+        # =====================================================
+        # Área Principal: Reportes (inactividad)
+        # =====================================================
 
-    if "ejecutar_rep" in locals() and ejecutar_rep:
-        with st.spinner("Generando reporte…"):
-            rep = fetch_inactives(tipo_rep, int(dias))
+        if "ejecutar_rep" in locals() and ejecutar_rep:
+            with st.spinner("Generando reporte…"):
+                rep = fetch_inactives(tipo_rep, int(dias))
 
-        if not rep:
-            st.warning("No se encontraron resultados con ese criterio.")
-            st.stop()
+            if not rep:
+                st.warning("No se encontraron resultados con ese criterio.")
+                st.stop()
 
-        df = pd.DataFrame(rep)
-        st.success(f"{tipo_rep} inactivos > {dias} días (scope: MRO) — Total: {len(df)}")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+            df = pd.DataFrame(rep)
+            st.success(f"{tipo_rep} inactivos > {dias} días (scope: MRO) — Total: {len(df)}")
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        st.caption("Nota: lastLogonTimestamp es aproximado y replicado (útil para higiene 30/60/90 días).")
+            st.caption("Nota: lastLogonTimestamp es aproximado y replicado (útil para higiene 30/60/90 días).")
+
+
+if __name__ == "__main__":
+    main()
