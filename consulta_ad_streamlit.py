@@ -26,6 +26,8 @@ import pythoncom
 import html
 import pandas as pd
 import hashlib
+import json
+import subprocess
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 import threading
@@ -224,6 +226,12 @@ TARGET_WKS_OU_DN: str = f"{_target_wks_ou},{DOMAIN_DN}"
 SCOPE_OU_DN: str = f"{_scope_ou},{DOMAIN_DN}"
 
 logger.info(f"AD Config: domain={DOMAIN_DN}, scope_ou={SCOPE_OU_DN}")
+
+
+# =====================================================
+# Configuración WMI
+# =====================================================
+WMI_ENABLED = bool(get_config("wmi.enabled", True))
 
 
 # =====================================================
@@ -477,6 +485,174 @@ def stable_key(prefix: str, seed: str) -> str:
     seed = seed or ""
     h = hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
     return f"{prefix}_{h}"
+
+
+def _run_powershell_json(script: str, timeout_seconds: int = 25) -> Any:
+    """
+    Ejecuta PowerShell y devuelve la salida parseada como JSON.
+    """
+    if not script:
+        raise ValueError("Script PowerShell vacío.")
+
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]
+
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+    except FileNotFoundError as exc:
+        raise RuntimeError("PowerShell no disponible en el sistema.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Timeout ejecutando PowerShell ({timeout_seconds}s).") from exc
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+
+    if completed.returncode != 0:
+        msg = stderr or stdout or f"PowerShell error (code {completed.returncode})"
+        raise RuntimeError(msg)
+
+    if not stdout:
+        raise RuntimeError("PowerShell no devolvió salida.")
+
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Salida JSON inválida: {exc}") from exc
+
+
+def _sanitize_wmi_host(host: Any) -> str:
+    host = (str(host) if host is not None else "").strip()
+    if not host or host == "—":
+        return ""
+    return re.sub(r"[^A-Za-z0-9._-]", "", host)
+
+
+def compute_wmi_target_host(visibles: Dict[str, Any]) -> str:
+    """
+    Usa DNS Hostname si existe; si no, SAMAccountName sin $.
+    """
+    dns = _sanitize_wmi_host(visibles.get("DNS Hostname"))
+    if dns:
+        return dns
+
+    sam = (str(visibles.get("Equipo") or "")).strip()
+    if sam.endswith("$"):
+        sam = sam[:-1]
+    return _sanitize_wmi_host(sam)
+
+
+def _normalize_wmi_inventory(raw: Any, fallback_host: str) -> Dict[str, Any]:
+    if raw is None:
+        raise RuntimeError("Respuesta WMI vacía.")
+
+    if isinstance(raw, list) and raw:
+        raw = raw[0]
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("Respuesta WMI inválida (no es objeto JSON).")
+
+    normalized: Dict[str, Any] = {}
+    keys = ["Equipo", "Modelo", "Fabricante", "Serial", "SO", "Build", "UltimoBoot"]
+
+    for key in keys:
+        value = raw.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if key == "Equipo" and fallback_host:
+                value = fallback_host
+            else:
+                value = "—"
+        normalized[key] = value
+
+    return normalized
+
+
+def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
+    """
+    Obtiene inventario vía CIM y si falla cae a WMI clásico.
+    """
+    host = _sanitize_wmi_host(target_host)
+    if not host:
+        raise ValueError("Host vacío para consulta WMI.")
+
+    cim_script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$ProgressPreference = 'SilentlyContinue'; "
+        f"$target = '{host}'; "
+        "$cs = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $target; "
+        "$bios = Get-CimInstance -ClassName Win32_BIOS -ComputerName $target; "
+        "$os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $target; "
+        "$inv = [ordered]@{ "
+        "Equipo = $cs.Name; "
+        "Modelo = $cs.Model; "
+        "Fabricante = $cs.Manufacturer; "
+        "Serial = $bios.SerialNumber; "
+        "SO = $os.Caption; "
+        "Build = $os.BuildNumber; "
+        "UltimoBoot = $os.LastBootUpTime; "
+        "}; "
+        "$inv | ConvertTo-Json -Compress"
+    )
+
+    wmi_script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$ProgressPreference = 'SilentlyContinue'; "
+        f"$target = '{host}'; "
+        "$cs = Get-WmiObject -Class Win32_ComputerSystem -ComputerName $target; "
+        "$bios = Get-WmiObject -Class Win32_BIOS -ComputerName $target; "
+        "$os = Get-WmiObject -Class Win32_OperatingSystem -ComputerName $target; "
+        "$inv = [ordered]@{ "
+        "Equipo = $cs.Name; "
+        "Modelo = $cs.Model; "
+        "Fabricante = $cs.Manufacturer; "
+        "Serial = $bios.SerialNumber; "
+        "SO = $os.Caption; "
+        "Build = $os.BuildNumber; "
+        "UltimoBoot = $os.LastBootUpTime; "
+        "}; "
+        "$inv | ConvertTo-Json -Compress"
+    )
+
+    cim_error = None
+    try:
+        data = _run_powershell_json(cim_script)
+        return _normalize_wmi_inventory(data, host)
+    except Exception as exc:
+        cim_error = str(exc)
+
+    try:
+        data = _run_powershell_json(wmi_script)
+        return _normalize_wmi_inventory(data, host)
+    except Exception as exc:
+        wmi_error = str(exc)
+        raise RuntimeError(f"CIM falló: {cim_error}. WMI falló: {wmi_error}")
+
+
+def get_wmi_inventory_cached(target_host: str) -> Dict[str, Any]:
+    """
+    Cachea inventario WMI por TTL usando el cache global.
+    """
+    if not target_host:
+        raise ValueError("Host vacío para cache WMI.")
+
+    cache_key = f"wmi_inventory:{target_host}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = fetch_wmi_inventory(target_host)
+    try:
+        ttl_minutes = int(get_config("cache.wmi_ttl_minutes", 10))
+    except Exception:
+        ttl_minutes = 10
+    _cache.set(cache_key, result, ttl_minutes)
+    return result
 
 
 def ad_largeint_to_int(val) -> int:
@@ -1992,10 +2168,81 @@ if modo in ("Usuario", "Equipo"):
             for k, v in items[mid:]:
                 render_card(k, v)
 
-else:
-    # =====================================================
-    # Área Principal: Reportes (inactividad)
-    # =====================================================
+        # =====================================================
+        # Inventario WMI (BIOS / Modelo / SO)
+        # =====================================================
+        if WMI_ENABLED:
+            if dn and st.session_state.get("wmi_dn") != dn:
+                st.session_state["wmi_dn"] = dn
+                st.session_state.pop("wmi_data", None)
+                st.session_state.pop("wmi_error", None)
+
+            st.markdown("---")
+            wmi_data = st.session_state.get("wmi_data")
+            wmi_error = st.session_state.get("wmi_error")
+            expanded = bool(wmi_data or wmi_error)
+
+            with st.expander("🧾 Inventario WMI (BIOS / Modelo / SO)", expanded=expanded):
+                target_host = compute_wmi_target_host(visibles)
+
+                if target_host:
+                    st.caption(f"Target: {target_host}")
+                else:
+                    st.warning("No hay hostname disponible para consultar WMI.")
+
+                if wmi_error:
+                    st.error(f"WMI/CIM error: {wmi_error}")
+
+                if wmi_data:
+                    cA, cB = st.columns(2)
+                    left = ["Equipo", "Fabricante", "Modelo", "Serial"]
+                    right = ["SO", "Build", "UltimoBoot"]
+                    with cA:
+                        for k in left:
+                            if k in wmi_data:
+                                render_card(k, wmi_data.get(k))
+                    with cB:
+                        for k in right:
+                            if k in wmi_data:
+                                render_card(k, wmi_data.get(k))
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button(
+                        "📥 Cargar inventario WMI",
+                        key=stable_key("wmi_load", dn),
+                        use_container_width=True,
+                        type="primary",
+                        disabled=not target_host,
+                    ):
+                        try:
+                            with st.spinner("Consultando Win32_* vía PowerShell…"):
+                                inv = get_wmi_inventory_cached(target_host)
+                            st.session_state["wmi_data"] = inv or {}
+                            st.session_state["wmi_error"] = None
+                            st.success("Inventario WMI cargado.")
+                        except Exception as e:
+                            st.session_state["wmi_data"] = {}
+                            st.session_state["wmi_error"] = str(e)
+                            st.error(f"No se pudo obtener WMI: {e}")
+
+                with c2:
+                    if st.button(
+                        "🔄 Refrescar WMI",
+                        key=stable_key("wmi_refresh", dn),
+                        use_container_width=True,
+                        disabled=not target_host,
+                    ):
+                        _cache.invalidate(f"wmi_inventory:{target_host}")
+                        st.session_state.pop("wmi_data", None)
+                        st.session_state.pop("wmi_error", None)
+                        st.info("WMI invalidado. Volvé a cargar.")
+                        st.stop()
+
+    else:
+        # =====================================================
+        # Área Principal: Reportes (inactividad)
+        # =====================================================
 
     if "ejecutar_rep" in locals() and ejecutar_rep:
         with st.spinner("Generando reporte…"):
