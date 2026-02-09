@@ -559,7 +559,7 @@ def _normalize_wmi_inventory(raw: Any, fallback_host: str) -> Dict[str, Any]:
         raise RuntimeError("Respuesta WMI inválida (no es objeto JSON).")
 
     normalized: Dict[str, Any] = {}
-    keys = ["Equipo", "Modelo", "Fabricante", "Serial", "SO", "Build", "UltimoBoot"]
+    keys = ["Equipo", "Modelo", "Fabricante", "Serial", "SO", "Build", "UltimoBoot", "Usuario logueado"]
 
     for key in keys:
         value = raw.get(key)
@@ -588,6 +588,8 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
         "$cs = Get-CimInstance -ClassName Win32_ComputerSystem -ComputerName $target; "
         "$bios = Get-CimInstance -ClassName Win32_BIOS -ComputerName $target; "
         "$os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName $target; "
+        "$lastBoot = $os.LastBootUpTime; "
+        "if ($lastBoot) { $lastBoot = (Get-Date $lastBoot -Format 'dd/MM/yyyy HH:mm') } "
         "$inv = [ordered]@{ "
         "Equipo = $cs.Name; "
         "Modelo = $cs.Model; "
@@ -595,7 +597,8 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
         "Serial = $bios.SerialNumber; "
         "SO = $os.Caption; "
         "Build = $os.BuildNumber; "
-        "UltimoBoot = $os.LastBootUpTime; "
+        "UltimoBoot = $lastBoot; "
+        "'Usuario logueado' = $cs.UserName; "
         "}; "
         "$inv | ConvertTo-Json -Compress"
     )
@@ -607,6 +610,8 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
         "$cs = Get-WmiObject -Class Win32_ComputerSystem -ComputerName $target; "
         "$bios = Get-WmiObject -Class Win32_BIOS -ComputerName $target; "
         "$os = Get-WmiObject -Class Win32_OperatingSystem -ComputerName $target; "
+        "$lastBoot = $os.LastBootUpTime; "
+        "try { $lastBoot = [System.Management.ManagementDateTimeConverter]::ToDateTime($lastBoot).ToString('dd/MM/yyyy HH:mm') } catch { } "
         "$inv = [ordered]@{ "
         "Equipo = $cs.Name; "
         "Modelo = $cs.Model; "
@@ -614,7 +619,8 @@ def fetch_wmi_inventory(target_host: str) -> Dict[str, Any]:
         "Serial = $bios.SerialNumber; "
         "SO = $os.Caption; "
         "Build = $os.BuildNumber; "
-        "UltimoBoot = $os.LastBootUpTime; "
+        "UltimoBoot = $lastBoot; "
+        "'Usuario logueado' = $cs.UserName; "
         "}; "
         "$inv | ConvertTo-Json -Compress"
     )
@@ -2152,94 +2158,62 @@ def main():
             dn = data.get("_dn", "")
             in_default = bool(data.get("_in_default_ou", False))
 
-            visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
+        visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
 
-            col1, col2 = st.columns(2)
-            with col1:
-                if dn and in_default:
-                    render_move_computer_card(in_default, dn, last_criterio)
+        wmi_items: List[tuple[str, Any]] = []
+        wmi_note = None
 
-                items = list(visibles.items())
-                mid = len(items) // 2
-                for k, v in items[:mid]:
-                    render_card(k, v)
+        if WMI_ENABLED:
+            if dn and st.session_state.get("wmi_dn") != dn:
+                st.session_state["wmi_dn"] = dn
+                st.session_state.pop("wmi_data", None)
+                st.session_state.pop("wmi_error", None)
 
-            with col2:
-                items = list(visibles.items())
-                mid = len(items) // 2
-                for k, v in items[mid:]:
-                    render_card(k, v)
-
-            # =====================================================
-            # Inventario WMI (BIOS / Modelo / SO)
-            # =====================================================
-            if WMI_ENABLED:
-                if dn and st.session_state.get("wmi_dn") != dn:
-                    st.session_state["wmi_dn"] = dn
-                    st.session_state.pop("wmi_data", None)
-                    st.session_state.pop("wmi_error", None)
-
-                st.markdown("---")
+            target_host = compute_wmi_target_host(visibles)
+            if target_host:
                 wmi_data = st.session_state.get("wmi_data")
                 wmi_error = st.session_state.get("wmi_error")
-                expanded = bool(wmi_data or wmi_error)
 
-                with st.expander("🧾 Inventario WMI (BIOS / Modelo / SO)", expanded=expanded):
-                    target_host = compute_wmi_target_host(visibles)
+                if wmi_data is None and wmi_error is None:
+                    try:
+                        wmi_data = get_wmi_inventory_cached(target_host)
+                        st.session_state["wmi_data"] = wmi_data or {}
+                        st.session_state["wmi_error"] = None
+                    except Exception as e:
+                        wmi_error = str(e)
+                        st.session_state["wmi_data"] = {}
+                        st.session_state["wmi_error"] = wmi_error
 
-                    if target_host:
-                        st.caption(f"Target: {target_host}")
-                    else:
-                        st.warning("No hay hostname disponible para consultar WMI.")
+                if wmi_data:
+                    for key in ("Serial", "UltimoBoot", "Usuario logueado"):
+                        if key in wmi_data:
+                            wmi_items.append((key, wmi_data.get(key)))
 
+                if not wmi_items:
                     if wmi_error:
-                        st.error(f"WMI/CIM error: {wmi_error}")
+                        wmi_note = f"WMI: {wmi_error}"
+                    else:
+                        wmi_note = "WMI: sin datos disponibles."
+            else:
+                wmi_note = "WMI: sin hostname disponible para consultar."
 
-                    if wmi_data:
-                        cA, cB = st.columns(2)
-                        left = ["Equipo", "Fabricante", "Modelo", "Serial"]
-                        right = ["SO", "Build", "UltimoBoot"]
-                        with cA:
-                            for k in left:
-                                if k in wmi_data:
-                                    render_card(k, wmi_data.get(k))
-                        with cB:
-                            for k in right:
-                                if k in wmi_data:
-                                    render_card(k, wmi_data.get(k))
+        items = list(visibles.items()) + wmi_items
+        mid = len(items) // 2
 
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button(
-                            "📥 Cargar inventario WMI",
-                            key=stable_key("wmi_load", dn),
-                            use_container_width=True,
-                            type="primary",
-                            disabled=not target_host,
-                        ):
-                            try:
-                                with st.spinner("Consultando Win32_* vía PowerShell…"):
-                                    inv = get_wmi_inventory_cached(target_host)
-                                st.session_state["wmi_data"] = inv or {}
-                                st.session_state["wmi_error"] = None
-                                st.success("Inventario WMI cargado.")
-                            except Exception as e:
-                                st.session_state["wmi_data"] = {}
-                                st.session_state["wmi_error"] = str(e)
-                                st.error(f"No se pudo obtener WMI: {e}")
+        col1, col2 = st.columns(2)
+        with col1:
+            if dn and in_default:
+                render_move_computer_card(in_default, dn, last_criterio)
 
-                    with c2:
-                        if st.button(
-                            "🔄 Refrescar WMI",
-                            key=stable_key("wmi_refresh", dn),
-                            use_container_width=True,
-                            disabled=not target_host,
-                        ):
-                            _cache.invalidate(f"wmi_inventory:{target_host}")
-                            st.session_state.pop("wmi_data", None)
-                            st.session_state.pop("wmi_error", None)
-                            st.info("WMI invalidado. Volvé a cargar.")
-                            st.stop()
+            for k, v in items[:mid]:
+                render_card(k, v)
+
+        with col2:
+            for k, v in items[mid:]:
+                render_card(k, v)
+
+        if wmi_note:
+            st.caption(wmi_note)
 
     else:
         # =====================================================
