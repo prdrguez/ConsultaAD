@@ -2240,10 +2240,10 @@ if modo in ("Usuario", "Equipo"):
                         st.info("WMI invalidado. Volvé a cargar.")
                         st.stop()
 
-    else:
-        # =====================================================
-        # Área Principal: Reportes (inactividad)
-        # =====================================================
+else:
+    # =====================================================
+    # Área Principal: Reportes (inactividad)
+    # =====================================================
 
     if "ejecutar_rep" in locals() and ejecutar_rep:
         with st.spinner("Generando reporte…"):
