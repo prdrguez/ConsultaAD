@@ -2064,10 +2064,11 @@ if modo in ("Usuario", "Equipo"):
                         st.session_state["groups_error"] = None
 
                     ensure_export_ready(dn, data)
-                    st.rerun()
-
-                st.caption("Tip: puede demorar si el usuario tiene muchos grupos.")
-                st.stop()
+                    grupos = st.session_state.get("groups_list")
+                    groups_error = st.session_state.get("groups_error")
+                else:
+                    st.caption("Tip: puede demorar si el usuario tiene muchos grupos.")
+                    st.stop()
 
             if groups_error:
                 st.error(groups_error)
@@ -2119,7 +2120,7 @@ if modo in ("Usuario", "Equipo"):
 
             export_txt = st.session_state.get("export_txt_bytes")
             export_csv = st.session_state.get("export_csv_bytes")
-            stamp = st.session_state.get("export_stamp") or datetime.now().strftime("%Y%m%d_%H%M%S")
+            stamp = st.session_state.get("export_stamp") or "export"
             user_sam = str(visibles.get("Usuario", "usuario")).replace("$", "")
 
             if not export_txt or not export_csv:
