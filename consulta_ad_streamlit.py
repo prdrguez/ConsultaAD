@@ -2194,25 +2194,36 @@ def main():
                 st.session_state.pop("wmi_error", None)
 
             target_host = compute_wmi_target_host(visibles)
+            wmi_data = st.session_state.get("wmi_data")
+            wmi_error = st.session_state.get("wmi_error")
+            button_label = "Cargar WMI" if not wmi_data else "Refrescar WMI"
+
+            col_wmi_btn, col_wmi_note = st.columns([1, 3])
+            with col_wmi_btn:
+                load_wmi = st.button(
+                    button_label,
+                    key=stable_key("wmi_load", dn),
+                    use_container_width=True,
+                    disabled=not target_host,
+                )
+
+            if load_wmi and target_host:
+                try:
+                    with st.spinner("Consultando WMI/CIM…"):
+                        wmi_data = get_wmi_inventory_cached(target_host)
+                    st.session_state["wmi_data"] = wmi_data or {}
+                    st.session_state["wmi_error"] = None
+                    wmi_error = None
+                except Exception as e:
+                    err_text = str(e)
+                    if "CIM falló" in err_text:
+                        wmi_error = err_text
+                    else:
+                        wmi_error = _summarize_wmi_error(err_text)
+                    st.session_state["wmi_data"] = {}
+                    st.session_state["wmi_error"] = wmi_error
+
             if target_host:
-                wmi_data = st.session_state.get("wmi_data")
-                wmi_error = st.session_state.get("wmi_error")
-
-                if wmi_data is None and wmi_error is None:
-                    try:
-                        with st.spinner("Consultando WMI/CIM…"):
-                            wmi_data = get_wmi_inventory_cached(target_host)
-                        st.session_state["wmi_data"] = wmi_data or {}
-                        st.session_state["wmi_error"] = None
-                    except Exception as e:
-                        err_text = str(e)
-                        if "CIM falló" in err_text:
-                            wmi_error = err_text
-                        else:
-                            wmi_error = _summarize_wmi_error(err_text)
-                        st.session_state["wmi_data"] = {}
-                        st.session_state["wmi_error"] = wmi_error
-
                 if wmi_data:
                     for key in ("Serial", "UltimoBoot", "Usuario logueado"):
                         if key in wmi_data:
@@ -2221,10 +2232,16 @@ def main():
                 if not wmi_items:
                     if wmi_error:
                         wmi_note = f"WMI: {wmi_error}"
+                    elif wmi_data is None and wmi_error is None:
+                        wmi_note = "WMI: presioná \"Cargar WMI\" para intentar."
                     else:
                         wmi_note = "WMI: sin datos disponibles."
             else:
                 wmi_note = "WMI: sin hostname disponible para consultar."
+
+            with col_wmi_note:
+                if wmi_note:
+                    st.caption(wmi_note)
 
         items = list(visibles.items()) + wmi_items
         mid = len(items) // 2
