@@ -37,6 +37,18 @@ from typing import Optional, Dict, List, Any
 from pyad import adobject
 from functools import lru_cache
 
+try:
+    import pywintypes
+except Exception:
+    pywintypes = None
+
+
+class _DummyComError(Exception):
+    """Fallback para entornos donde pywintypes no está disponible."""
+
+
+PYWINTYPES_COM_ERROR = pywintypes.com_error if pywintypes else _DummyComError
+
 # =====================================================
 # Logging Configuration
 # =====================================================
@@ -548,6 +560,56 @@ def filetime_to_dt_str(filetime) -> str:
         return dt_local.strftime("%d/%m/%Y %H:%M")
     except Exception:
         return "—"
+
+
+def parse_wmi_datetime(wmi_raw) -> str:
+    """
+    Convierte datetime WMI (DMTF) a formato DD/MM/YYYY HH:MM.
+
+    Ejemplo de entrada:
+        "20260124090123.500000-180"
+    """
+    if not wmi_raw:
+        return "—"
+
+    raw = str(wmi_raw).strip()
+    if len(raw) < 14:
+        return "—"
+
+    try:
+        dt_val = datetime.strptime(raw[:14], "%Y%m%d%H%M%S")
+
+        # Offset opcional de WMI (minutos respecto a UTC), ej: -180
+        if len(raw) >= 25:
+            sign = raw[21]
+            offset = raw[22:25]
+            if sign in ("+", "-") and offset.isdigit():
+                mins = int(offset)
+                if sign == "-":
+                    mins = -mins
+                src_tz = timezone(timedelta(minutes=mins))
+                dt_val = dt_val.replace(tzinfo=src_tz).astimezone()
+
+        return dt_val.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return "—"
+
+
+def resolve_computer_host(visibles: Dict[str, Any]) -> str:
+    """
+    Elige el host remoto para WMI:
+    1) DNS Hostname
+    2) Nombre de equipo sin '$'
+    """
+    dns_host = normalize_ad_text(visibles.get("DNS Hostname"))
+    if dns_host and dns_host != "—":
+        return dns_host
+
+    equipo = normalize_ad_text(visibles.get("Equipo"))
+    if equipo and equipo != "—":
+        return equipo.rstrip("$")
+
+    return ""
 
 
 def dt_to_filetime(dt_obj: datetime) -> int:
@@ -1246,6 +1308,65 @@ def get_computer_data(samname: str) -> Optional[Dict[str, Any]]:
         return {"error": str(e)}
 
 
+def fetch_wmi_extra(host: str) -> Dict[str, str]:
+    """
+    Consulta datos extra del equipo vía WMI remoto (DCOM).
+
+    Campos:
+        - Fabricante (Win32_ComputerSystem.Manufacturer)
+        - OS Build (Win32_OperatingSystem.BuildNumber)
+        - Último boot (Win32_OperatingSystem.LastBootUpTime)
+        - Usuario logueado (Win32_ComputerSystem.UserName, usuario actual)
+    """
+    host = (host or "").strip()
+    if not host:
+        raise ValueError("Host vacío para consulta WMI remota.")
+
+    with com_context():
+        import win32com.client
+
+        try:
+            locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+            svc = locator.ConnectServer(host, r"root\cimv2")
+
+            # Impersonation requerido en varios entornos para consultas remotas.
+            try:
+                svc.Security_.ImpersonationLevel = 3
+            except Exception:
+                pass
+
+            fabricante = "—"
+            usuario = "—"
+            build = "—"
+            ultimo_boot = "—"
+
+            cs_rows = svc.ExecQuery("SELECT Manufacturer, UserName FROM Win32_ComputerSystem")
+            for row in cs_rows:
+                fabricante = normalize_ad_text(getattr(row, "Manufacturer", None))
+                user_name = normalize_ad_text(getattr(row, "UserName", None))
+                usuario = user_name if user_name != "—" else "—"
+                break
+
+            os_rows = svc.ExecQuery("SELECT BuildNumber, LastBootUpTime FROM Win32_OperatingSystem")
+            for row in os_rows:
+                build = normalize_ad_text(getattr(row, "BuildNumber", None))
+                ultimo_boot = parse_wmi_datetime(getattr(row, "LastBootUpTime", None))
+                break
+
+            return {
+                "Fabricante": fabricante,
+                "OS Build": build,
+                "Último boot": ultimo_boot,
+                "Usuario logueado": usuario,
+            }
+        except PYWINTYPES_COM_ERROR as e:
+            logger.error(f"✗ WMI remoto COM error en '{host}': {type(e).__name__}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"✗ Error WMI remoto en '{host}': {type(e).__name__}: {e}", exc_info=True)
+            raise
+
+
 # =====================================================
 # Reportes (Usuarios/Equipos inactivos)
 # =====================================================
@@ -1400,6 +1521,7 @@ def build_user_export_csv(user_data: Dict[str, Any], groups: List[str]) -> bytes
 
 def reset_user_caches_for_dn(dn: str) -> None:
     st.session_state["groups_dn"] = dn
+    st.session_state["groups_expanded"] = False
     st.session_state.pop("groups_list", None)
     st.session_state.pop("groups_error", None)
 
@@ -1407,6 +1529,21 @@ def reset_user_caches_for_dn(dn: str) -> None:
     st.session_state.pop("export_csv_bytes", None)
     st.session_state.pop("export_stamp", None)
     st.session_state.pop("export_stamp_dn", None)
+
+
+def reset_computer_wmi_cache_for_host(host: str, keep_expanded: bool = False) -> None:
+    st.session_state["wmi_extra_host"] = host
+    st.session_state["wmi_extra_expanded"] = bool(keep_expanded)
+    st.session_state.pop("wmi_extra_data", None)
+    st.session_state.pop("wmi_extra_error", None)
+
+
+def set_groups_expanded(opened: bool = True) -> None:
+    st.session_state["groups_expanded"] = bool(opened)
+
+
+def set_wmi_expanded(opened: bool = True) -> None:
+    st.session_state["wmi_extra_expanded"] = bool(opened)
 
 
 def ensure_export_ready(dn: str, user_data: Dict[str, Any]) -> None:
@@ -1636,7 +1773,7 @@ def render_reset_password_section(dn: str) -> None:
             "🔑 Ejecutar reset",
             key=stable_key("resetpwd", dn),
             use_container_width=True,
-            type="primary",
+            type="secondary",
             disabled=not confirm,
         )
 
@@ -1809,6 +1946,10 @@ def main():
         last_criterio = st.session_state.get("last_criterio", "")
         st.success(f"{last_modo} encontrado:")
 
+        dn = ""
+        in_default = False
+        visibles: Dict[str, Any] = {}
+
         if last_modo == "Usuario" and debug:
             with st.expander("🧪 Debug AD"):
                 st.write("**DN:**", data.get("_dn"))
@@ -1866,7 +2007,8 @@ def main():
                     st.info("No hay DN para ejecutar acciones.")
 
             # Grupos + Export (mismo expander)
-            with st.expander("📁 Ver grupos del usuario", expanded=False):
+            groups_expanded = bool(st.session_state.get("groups_expanded", False))
+            with st.expander("📁 Ver grupos del usuario", expanded=groups_expanded):
                 if not dn:
                     st.write("No hay DN para este usuario.")
                     st.stop()
@@ -1875,9 +2017,15 @@ def main():
                 groups_error = st.session_state.get("groups_error")
 
                 if grupos is None and not groups_error:
-                    if st.button("📥 Cargar grupos", key=stable_key("loadgroups", dn), use_container_width=True, type="primary"):
+                    if st.button(
+                        "📥 Cargar grupos",
+                        key=stable_key("loadgroups", dn),
+                        use_container_width=True,
+                        type="secondary",
+                        on_click=set_groups_expanded,
+                    ):
                         with com_context():
-                            with st.spinner("Leyendo grupos desde Active Directory…"):
+                            with st.spinner("Leyendo grupos desde Active Directory…", show_time=True):
                                 g = get_groups_from_dn(dn)
 
                         if g and isinstance(g, list) and str(g[0]).startswith("Error obteniendo grupos:"):
@@ -1902,7 +2050,13 @@ def main():
 
                 colR1, colR2 = st.columns([1, 3])
                 with colR1:
-                    if st.button("🔄 Refrescar", key=stable_key("refgroups", dn), use_container_width=True):
+                    if st.button(
+                        "🔄 Refrescar",
+                        key=stable_key("refgroups", dn),
+                        use_container_width=True,
+                        type="secondary",
+                        on_click=set_groups_expanded,
+                    ):
                         st.session_state.pop("groups_list", None)
                         st.session_state.pop("groups_error", None)
                         st.session_state.pop("export_txt_bytes", None)
@@ -1974,23 +2128,99 @@ def main():
             # Equipo
             dn = data.get("_dn", "")
             in_default = bool(data.get("_in_default_ou", False))
+            visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
+            host = resolve_computer_host(visibles)
 
-        visibles = {k: v for k, v in data.items() if k not in ("_dn", "_in_default_ou")}
+            if host and st.session_state.get("wmi_extra_host") != host:
+                reset_computer_wmi_cache_for_host(host)
 
-        items = list(visibles.items())
-        mid = len(items) // 2
+            items = list(visibles.items())
+            mid = len(items) // 2
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if dn and in_default:
-                render_move_computer_card(in_default, dn, last_criterio)
+            col1, col2 = st.columns(2)
+            with col1:
+                if dn and in_default:
+                    render_move_computer_card(in_default, dn, last_criterio)
 
-            for k, v in items[:mid]:
-                render_card(k, v)
+                for k, v in items[:mid]:
+                    render_card(k, v)
 
-        with col2:
-            for k, v in items[mid:]:
-                render_card(k, v)
+            with col2:
+                for k, v in items[mid:]:
+                    render_card(k, v)
+
+            st.markdown("---")
+            wmi_expanded = bool(st.session_state.get("wmi_extra_expanded", False))
+            with st.expander("🧾 Info extra (WMI remoto)", expanded=wmi_expanded):
+                if not host:
+                    st.info("No hay hostname disponible para consulta remota.")
+                else:
+                    wmi_data = st.session_state.get("wmi_extra_data")
+                    wmi_error = st.session_state.get("wmi_extra_error")
+
+                    if wmi_data is None and not wmi_error:
+                        if st.button(
+                            "📥 Cargar info extra",
+                            key=stable_key("loadwmi", host),
+                            use_container_width=True,
+                            type="secondary",
+                            on_click=set_wmi_expanded,
+                        ):
+                            try:
+                                with st.spinner(f"Consultando info extra en {host} por WMI remoto…", show_time=True):
+                                    wmi_data = fetch_wmi_extra(host)
+                                st.session_state["wmi_extra_data"] = wmi_data
+                                st.session_state["wmi_extra_error"] = None
+                            except PYWINTYPES_COM_ERROR as e:
+                                friendly = (
+                                    f"No se pudo obtener info remota por WMI en {host}. "
+                                    "Revisá firewall, permisos o DCOM."
+                                )
+                                detail = f"{type(e).__name__}: {e}"
+                                st.session_state["wmi_extra_data"] = None
+                                st.session_state["wmi_extra_error"] = {"friendly": friendly, "detail": detail}
+                                wmi_data = None
+                                wmi_error = st.session_state["wmi_extra_error"]
+                            except Exception as e:
+                                friendly = (
+                                    f"No se pudo obtener info remota por WMI en {host}. "
+                                    "Verificá conectividad y permisos."
+                                )
+                                detail = f"{type(e).__name__}: {e}"
+                                st.session_state["wmi_extra_data"] = None
+                                st.session_state["wmi_extra_error"] = {"friendly": friendly, "detail": detail}
+                                wmi_data = None
+                                wmi_error = st.session_state["wmi_extra_error"]
+                        else:
+                            st.caption("Consulta bajo demanda para evitar esperas innecesarias.")
+
+                    wmi_data = st.session_state.get("wmi_extra_data")
+                    wmi_error = st.session_state.get("wmi_extra_error")
+
+                    if wmi_error:
+                        st.error(wmi_error.get("friendly", "No se pudo obtener la info extra remota."))
+                        if debug:
+                            st.caption(wmi_error.get("detail", ""))
+
+                    if wmi_data:
+                        extra_items = list(wmi_data.items())
+                        xcol1, xcol2 = st.columns(2)
+                        with xcol1:
+                            for k, v in extra_items[:2]:
+                                render_card(k, v)
+                        with xcol2:
+                            for k, v in extra_items[2:]:
+                                render_card(k, v)
+
+                    if (wmi_data is not None or wmi_error) and st.button(
+                        "🔄 Refrescar",
+                        key=stable_key("refwmi", host),
+                        use_container_width=True,
+                        type="secondary",
+                        on_click=set_wmi_expanded,
+                    ):
+                        reset_computer_wmi_cache_for_host(host, keep_expanded=True)
+                        st.rerun()
 
     else:
         # =====================================================
