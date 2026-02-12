@@ -1314,7 +1314,7 @@ def fetch_wmi_extra(host: str) -> Dict[str, str]:
 
     Campos:
         - Fabricante (Win32_ComputerSystem.Manufacturer)
-        - Build (Win32_OperatingSystem.BuildNumber)
+        - OS Build (Win32_OperatingSystem.BuildNumber)
         - Último boot (Win32_OperatingSystem.LastBootUpTime)
         - Usuario logueado (Win32_ComputerSystem.UserName, usuario actual)
     """
@@ -1355,7 +1355,7 @@ def fetch_wmi_extra(host: str) -> Dict[str, str]:
 
             return {
                 "Fabricante": fabricante,
-                "Build": build,
+                "OS Build": build,
                 "Último boot": ultimo_boot,
                 "Usuario logueado": usuario,
             }
@@ -1521,6 +1521,7 @@ def build_user_export_csv(user_data: Dict[str, Any], groups: List[str]) -> bytes
 
 def reset_user_caches_for_dn(dn: str) -> None:
     st.session_state["groups_dn"] = dn
+    st.session_state["groups_expanded"] = False
     st.session_state.pop("groups_list", None)
     st.session_state.pop("groups_error", None)
 
@@ -1530,10 +1531,19 @@ def reset_user_caches_for_dn(dn: str) -> None:
     st.session_state.pop("export_stamp_dn", None)
 
 
-def reset_computer_wmi_cache_for_host(host: str) -> None:
+def reset_computer_wmi_cache_for_host(host: str, keep_expanded: bool = False) -> None:
     st.session_state["wmi_extra_host"] = host
+    st.session_state["wmi_extra_expanded"] = bool(keep_expanded)
     st.session_state.pop("wmi_extra_data", None)
     st.session_state.pop("wmi_extra_error", None)
+
+
+def set_groups_expanded(opened: bool = True) -> None:
+    st.session_state["groups_expanded"] = bool(opened)
+
+
+def set_wmi_expanded(opened: bool = True) -> None:
+    st.session_state["wmi_extra_expanded"] = bool(opened)
 
 
 def ensure_export_ready(dn: str, user_data: Dict[str, Any]) -> None:
@@ -1763,7 +1773,7 @@ def render_reset_password_section(dn: str) -> None:
             "🔑 Ejecutar reset",
             key=stable_key("resetpwd", dn),
             use_container_width=True,
-            type="primary",
+            type="secondary",
             disabled=not confirm,
         )
 
@@ -1997,7 +2007,8 @@ def main():
                     st.info("No hay DN para ejecutar acciones.")
 
             # Grupos + Export (mismo expander)
-            with st.expander("📁 Ver grupos del usuario", expanded=False):
+            groups_expanded = bool(st.session_state.get("groups_expanded", False))
+            with st.expander("📁 Ver grupos del usuario", expanded=groups_expanded):
                 if not dn:
                     st.write("No hay DN para este usuario.")
                     st.stop()
@@ -2006,9 +2017,15 @@ def main():
                 groups_error = st.session_state.get("groups_error")
 
                 if grupos is None and not groups_error:
-                    if st.button("📥 Cargar grupos", key=stable_key("loadgroups", dn), use_container_width=True, type="primary"):
+                    if st.button(
+                        "📥 Cargar grupos",
+                        key=stable_key("loadgroups", dn),
+                        use_container_width=True,
+                        type="secondary",
+                        on_click=set_groups_expanded,
+                    ):
                         with com_context():
-                            with st.spinner("Leyendo grupos desde Active Directory…"):
+                            with st.spinner("Leyendo grupos desde Active Directory…", show_time=True):
                                 g = get_groups_from_dn(dn)
 
                         if g and isinstance(g, list) and str(g[0]).startswith("Error obteniendo grupos:"):
@@ -2033,7 +2050,13 @@ def main():
 
                 colR1, colR2 = st.columns([1, 3])
                 with colR1:
-                    if st.button("🔄 Refrescar", key=stable_key("refgroups", dn), use_container_width=True):
+                    if st.button(
+                        "🔄 Refrescar",
+                        key=stable_key("refgroups", dn),
+                        use_container_width=True,
+                        type="secondary",
+                        on_click=set_groups_expanded,
+                    ):
                         st.session_state.pop("groups_list", None)
                         st.session_state.pop("groups_error", None)
                         st.session_state.pop("export_txt_bytes", None)
@@ -2127,7 +2150,8 @@ def main():
                     render_card(k, v)
 
             st.markdown("---")
-            with st.expander("🧾 Info extra (WMI remoto)", expanded=False):
+            wmi_expanded = bool(st.session_state.get("wmi_extra_expanded", False))
+            with st.expander("🧾 Info extra (WMI remoto)", expanded=wmi_expanded):
                 if not host:
                     st.info("No hay hostname disponible para consulta remota.")
                 else:
@@ -2139,10 +2163,11 @@ def main():
                             "📥 Cargar info extra",
                             key=stable_key("loadwmi", host),
                             use_container_width=True,
-                            type="primary",
+                            type="secondary",
+                            on_click=set_wmi_expanded,
                         ):
                             try:
-                                with st.spinner(f"Consultando info extra en {host} por WMI remoto…"):
+                                with st.spinner(f"Consultando info extra en {host} por WMI remoto…", show_time=True):
                                     wmi_data = fetch_wmi_extra(host)
                                 st.session_state["wmi_extra_data"] = wmi_data
                                 st.session_state["wmi_extra_error"] = None
@@ -2192,8 +2217,9 @@ def main():
                         key=stable_key("refwmi", host),
                         use_container_width=True,
                         type="secondary",
+                        on_click=set_wmi_expanded,
                     ):
-                        reset_computer_wmi_cache_for_host(host)
+                        reset_computer_wmi_cache_for_host(host, keep_expanded=True)
                         st.rerun()
 
     else:
