@@ -26,6 +26,8 @@ import pythoncom
 import html
 import pandas as pd
 import hashlib
+import csv
+import io
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 import threading
@@ -1513,10 +1515,28 @@ def build_user_export_txt(user_data: Dict[str, Any], groups: List[str]) -> bytes
 
 
 def build_user_export_csv(user_data: Dict[str, Any], groups: List[str]) -> bytes:
-    flat = {k: v for k, v in user_data.items() if k not in _INTERNAL_KEYS}
-    flat["Grupos"] = "; ".join(groups) if groups else ""
-    df = pd.DataFrame([flat])
-    return df.to_csv(index=False).encode("utf-8")
+    visible = {k: v for k, v in user_data.items() if k not in _INTERNAL_KEYS}
+
+    columns = []
+    if "Usuario" in visible:
+        columns.append("Usuario")
+    columns.extend([k for k in visible.keys() if k != "Usuario"])
+    columns.append("Grupos")
+
+    row: Dict[str, str] = {}
+    for col in columns:
+        if col == "Grupos":
+            row[col] = "; ".join(str(g) for g in groups) if groups else ""
+            continue
+
+        value = visible.get(col, "")
+        row[col] = "" if value is None else str(value)
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=columns)
+    writer.writeheader()
+    writer.writerow(row)
+    return buffer.getvalue().encode("utf-8")
 
 
 def reset_user_caches_for_dn(dn: str) -> None:
